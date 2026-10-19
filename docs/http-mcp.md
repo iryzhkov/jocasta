@@ -52,6 +52,13 @@ not select a trusted origin. The SDK's default localhost DNS rebinding protectio
 also remains enabled. Metadata is public and uses the SDK's discovery CORS support;
 this milestone does not add browser cross-origin tool access.
 
+For a loopback backend behind TLS ingress, preserve the public Origin but rewrite
+Host to the loopback upstream authority, or use an appropriately protected
+non-loopback backend address. Forwarding the public Host unchanged to a loopback
+listener triggers the SDK's DNS rebinding protection and returns 403. Keep that
+protection enabled; the configured public resource URL still determines audience,
+metadata and allowed Origin. Qualify the chosen ingress behavior before deployment.
+
 ## Tool contract
 
 Tools use SDK-generated object input schemas with the following fields. All
