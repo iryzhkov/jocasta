@@ -146,9 +146,11 @@ No username or app password is sent. The provider-secret path creates or updates
 account without roles, groups, permissions or login credentials, then bind only
 that account to the dedicated application before connecting its provider.
 `views/token.py:create_client_credentials_response` returns access-token metadata
-without a refresh token. The helper makes no admin API call. Disable the
-provider grant or detach the application to stop issuance; account disablement
-alone is not qualified for this generated-account path.
+without a refresh token. The helper makes no admin API call. Detach the
+application from its provider to stop fresh issuance, keeping its exact-user
+binding until disconnection is verified. The live API rejected an empty grant
+list; source support for that state does not prove API acceptance. Account
+disablement alone is not qualified for this generated-account path.
 
 After separate enrollment approval, provision a protected JSON file with exactly
 these fields. All paths must be absolute and normalized, without symlink
@@ -248,7 +250,7 @@ chaldea exec --host agent-a -- sh -ceu '
 '
 ```
 
-## Live enrollment packet, pending
+## Live enrollment and qualification
 
 The separately approved provisioning procedure creates one ordinary nonadmin machine
 account and one dedicated OAuth2/OIDC provider/application. Use only the
@@ -266,14 +268,19 @@ than browser ID tokens. Confirm claim types and whether the machine flow uses a
 client-associated sub; establish its stability before treating it as a user ID.
 Human SSO success does not qualify machine tokens.
 
-First live acceptance needs real five-minute issuance, allowed/denied project
-calls, write denial, wrong verifier audience/issuer, fresh reacquisition after
-five minutes and issuance refusal after disabling the provider grant. Signed
-claim inspection, old-token replay, future iat/nbf, requested-scope expansion,
-key rotation and Authentik admin-denial probes require separate reviewed tools
-and remain deferred. Exercise both projects through paths, IDs,
-aliases, historical revisions, ranges, exists/diff, archived data, all search
-modes, cursors and every mutation. Verify denied requests leave no document,
-revision, receipt or activity writes. Administrative rights must be absent by enrollment configuration; live API
-negative probes remain unqualified until reviewed tooling exists. Stop at
-disposable data until these prerequisites pass. No installed hosts were changed.
+A disposable REST/CLI canary passed 37 live assertions with a real issuer.
+Allowed project reads worked through paths, UUIDs, history, ranges and archives;
+sibling reads and cross-project aliases were denied. Paginated lists/searches
+stayed scoped, and a put mutation was rejected. Denied requests left the compared
+core document, revision, path, receipt, activity and state tables unchanged.
+Wrong issuer/audience were rejected. Fresh acquisition succeeded 331.6 seconds
+after the first call; detaching the application blocked the next acquisition.
+All six canary resources were deleted, absence checked, and private credentials
+and fixtures removed. This qualifies the trusted disposable REST slice only.
+
+Signed claim inspection, old-token expiry/replay, future iat/nbf, requested-scope
+expansion, key rotation and Authentik admin-denial probes remain deferred.
+Additional mutations, diff and search modes need their own live coverage.
+HTTP MCP/T3 integration and restricted-process isolation remain unqualified.
+Administrative rights must be absent by enrollment configuration. No host
+configuration or production Jocasta deployment was changed.
