@@ -51,6 +51,8 @@ func main() {
 	oidcIssuer := fs.String("oidc-issuer", env("JOCASTA_OIDC_ISSUER", ""), "exact trusted HTTPS OIDC issuer")
 	oidcAudience := fs.String("oidc-audience", env("JOCASTA_OIDC_AUDIENCE", ""), "required JWT audience")
 	oidcJWKS := fs.String("oidc-jwks-url", env("JOCASTA_OIDC_JWKS_URL", ""), "pinned HTTPS JWKS URL; no discovery")
+	mcpResource := fs.String("mcp-resource-url", env("JOCASTA_MCP_RESOURCE_URL", ""), "opt-in canonical HTTPS MCP resource URL ending in /mcp")
+	mcpLoopback := fs.Bool("mcp-allow-loopback-http", false, "allow loopback HTTP MCP resource for disposable fixtures")
 	output := fs.String("output", "", "new backup database path")
 	days := fs.Int("days", int(number("JOCASTA_ARCHIVE_AFTER_DAYS", 30)), "inactivity days before archival")
 	fs.Parse(args)
@@ -99,6 +101,13 @@ func main() {
 		log.Fatal("at least one authentication method is required")
 	}
 	handler := server.New(s, server.Config{TokensFile: *tokens, OIDC: oidc, MaxDocumentBytes: cfg.MaxDocumentBytes})
+	if *mcpResource != "" {
+		if err = handler.EnableMCP(*mcpResource, *mcpLoopback); err != nil {
+			log.Fatal(err)
+		}
+	} else if *mcpLoopback {
+		log.Fatal("--mcp-allow-loopback-http requires --mcp-resource-url")
+	}
 	srv := &http.Server{Addr: *listen, Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 45 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16384}
 	go func() {
 		<-ctx.Done()
