@@ -15,7 +15,7 @@ import urllib.parse
 import authentik_canary_client as helper
 
 
-PASSWORD = "synthetic-app-password&+="
+CLIENT_SECRET = "synthetic-provider-secret&+="
 TOKEN = "synthetic-access-token"
 
 
@@ -41,9 +41,9 @@ class CanaryTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.private = self.root / "private"
         self.private.mkdir(mode=0o700)
-        self.password = self.root / "password"
-        self.password.write_text(PASSWORD + "\n")
-        self.password.chmod(0o600)
+        self.client_secret = self.root / "client-secret"
+        self.client_secret.write_text(CLIENT_SECRET + "\n")
+        self.client_secret.chmod(0o600)
         self.binary = self.root / "reviewed-jocasta"
         self.binary.write_text("synthetic binary placeholder")
         self.binary.chmod(0o700)
@@ -52,8 +52,7 @@ class CanaryTests(unittest.TestCase):
             "expected_issuer": "https://auth.example/application/o/jocasta-canary/",
             "client_id": "jocasta-canary",
             "token_url": "https://auth.example/application/o/token/",
-            "username": "canary-machine",
-            "password_file": str(self.password),
+            "client_secret_file": str(self.client_secret),
             "private_dir": str(self.private),
             "jocasta_binary": str(self.binary),
             "jocasta_url": "http://127.0.0.1:18081",
@@ -79,7 +78,7 @@ class CanaryTests(unittest.TestCase):
             self.assertEqual(url, self.config["token_url"])
             self.assertEqual(urllib.parse.parse_qs(form.decode(), strict_parsing=True), {
                 "grant_type": ["client_credentials"], "client_id": ["jocasta-canary"],
-                "username": ["canary-machine"], "password": [PASSWORD],
+                "client_secret": [CLIENT_SECRET],
                 "scope": ["jocasta.read"],
             })
         self.assertEqual((self.private / "read-token").read_text(), "second-token")
@@ -96,14 +95,14 @@ class CanaryTests(unittest.TestCase):
                                 "exists", "canaryB/denied", "--json"])
         self.assertEqual(env, {"HOME": str(self.private), "TMPDIR": str(self.private),
                                "LANG": "C.UTF-8"})
-        self.assertNotIn(PASSWORD, repr(execute.call_args))
+        self.assertNotIn(CLIENT_SECRET, repr(execute.call_args))
         self.assertNotIn(TOKEN, repr(execute.call_args))
 
     def test_failure_never_launches_with_stale_token_and_redacts(self):
         stale = self.private / "read-token"
         stale.write_text("old-token")
         stale.chmod(0o600)
-        for error in (OSError(PASSWORD + TOKEN), TimeoutError(PASSWORD)):
+        for error in (OSError(CLIENT_SECRET + TOKEN), TimeoutError(CLIENT_SECRET)):
             with self.subTest(error=type(error).__name__), \
                     mock.patch.object(helper, "post_token", side_effect=error), \
                     mock.patch.object(helper.os, "execve") as execute:
@@ -113,7 +112,7 @@ class CanaryTests(unittest.TestCase):
                 execute.assert_not_called()
         self.assertEqual(stale.read_text(), "old-token")
         out, err = io.StringIO(), io.StringIO()
-        with mock.patch.object(helper, "post_token", return_value=PASSWORD.encode()), \
+        with mock.patch.object(helper, "post_token", return_value=CLIENT_SECRET.encode()), \
                 mock.patch.object(helper.os, "execve") as execute, \
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             self.assertEqual(helper.main([str(self.path), "get", "canaryA/allowed"]), 1)
@@ -196,7 +195,7 @@ class CanaryTests(unittest.TestCase):
             ("jocasta_url", "http://127.0.0.1:18081/other"),
             ("jocasta_url", "http://127.0.0.1:18081?query"),
             ("jocasta_url", "http://u:p@127.0.0.1:18081"),
-            ("password_file", str(self.private / "read-token")),
+            ("client_secret_file", str(self.private / "read-token")),
             ("password", "literal-password-is-forbidden"),
             ("client_secret", "forbidden"),
         ]
@@ -213,7 +212,7 @@ class CanaryTests(unittest.TestCase):
                     execute.assert_not_called()
 
     def test_private_input_modes_types_symlinks_and_parent_symlink(self):
-        for target in (self.path, self.password):
+        for target in (self.path, self.client_secret):
             for mode in (0o644, 0o660, 0o700):
                 with self.subTest(target=target.name, mode=mode):
                     target.chmod(mode)
@@ -232,12 +231,12 @@ class CanaryTests(unittest.TestCase):
         link = self.root / "parent-link"
         link.symlink_to(self.root, target_is_directory=True)
         with self.assertRaises(OSError):
-            helper.read_private(str(link / "password"), 4096)
+            helper.read_private(str(link / "client-secret"), 4096)
         fifo = self.root / "fifo"
         os.mkfifo(fifo, mode=0o600)
         with self.assertRaises(helper.CanaryError):
             helper.read_private(str(fifo), 4096)
-        self.assertEqual(helper.read_private(str(self.password), 4096), (PASSWORD + "\n").encode())
+        self.assertEqual(helper.read_private(str(self.client_secret), 4096), (CLIENT_SECRET + "\n").encode())
         with mock.patch.object(helper.os, "getuid", return_value=os.getuid() + 1):
             with self.assertRaises(helper.CanaryError):
                 helper.read_private(str(self.path), 16384)
@@ -253,11 +252,11 @@ class CanaryTests(unittest.TestCase):
             for kind in ("symlink", "directory", "public", "hardlink"):
                 with self.subTest(name=name, kind=kind):
                     if kind == "symlink":
-                        target.symlink_to(self.password)
+                        target.symlink_to(self.client_secret)
                     elif kind == "directory":
                         target.mkdir()
                     elif kind == "hardlink":
-                        os.link(self.password, target)
+                        os.link(self.client_secret, target)
                     else:
                         target.write_text("unsafe")
                         target.chmod(0o644)
@@ -274,7 +273,7 @@ class CanaryTests(unittest.TestCase):
         self.save_config()
         with self.assertRaises(OSError):
             self.launch()
-        self.assertEqual(self.password.read_text(), PASSWORD + "\n")
+        self.assertEqual(self.client_secret.read_text(), CLIENT_SECRET + "\n")
 
     def test_atomic_replace_failure_cleans_temp_and_preserves_existing(self):
         target = self.private / "read-token"
@@ -290,7 +289,7 @@ class CanaryTests(unittest.TestCase):
     def test_modified_client_config_is_replaced_with_fixed_values(self):
         client = self.private / "read-client.json"
         client.write_text(json.dumps({"url": "https://elsewhere.invalid",
-                                      "token_file": str(self.password)}))
+                                      "token_file": str(self.client_secret)}))
         client.chmod(0o600)
         with mock.patch.object(helper, "post_token", return_value=response()), \
                 mock.patch.object(helper.os, "execve"):
@@ -314,11 +313,11 @@ class CanaryTests(unittest.TestCase):
             [], ["sh", "-c", "anything"], ["get", "x", "--config", "other"],
             ["get", "x", "-config=other"], ["get", "x", "--config=other"],
             ["get", "x", "--url", "https://elsewhere.invalid"],
-            ["get", "x", "--token-file", "other"], ["get", "x", "--output", str(self.password)],
+            ["get", "x", "--token-file", "other"], ["get", "x", "--output", str(self.client_secret)],
             ["get", "x", "--overwrite"], ["get", "x", "--", "--config=other"],
             ["get", "x", "--id", "--config=other"], ["get", "x", "--id=--config=other"],
             ["get", "x", "--json=false"], ["get", "x", "--json", "--json"],
-            ["put", "x", "--create", "--file", str(self.password)],
+            ["put", "x", "--create", "--file", str(self.client_secret)],
             ["put", "x", "--create"], ["import", "--dry-run"], ["version"], ["list"],
         ]
         for args in rejected:
