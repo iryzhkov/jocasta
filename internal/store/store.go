@@ -28,9 +28,10 @@ type Config struct {
 	MaxDocumentBytes, MaxStorageBytes, MinFreeBytes int64
 }
 type Store struct {
-	db  *sql.DB
-	cfg Config
-	mu  sync.Mutex
+	db        *sql.DB
+	cfg       Config
+	mu        sync.Mutex
+	cursorKey [32]byte
 }
 
 func Invalid(message string) error { return &api.Error{Code: "invalid_input", Message: message} }
@@ -58,6 +59,10 @@ func Open(cfg Config) (*Store, error) {
 	}
 	db.SetMaxOpenConns(1)
 	s := &Store{db: db, cfg: cfg}
+	if _, err = rand.Read(s.cursorKey[:]); err != nil {
+		db.Close()
+		return nil, err
+	}
 	fail := func(err error) (*Store, error) { db.Close(); return nil, err }
 	var version int
 	if err = db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
@@ -172,9 +177,21 @@ func resolve(ctx context.Context, q querier, path, id string, revision int64) (a
 		if err != nil {
 			return d, false, err
 		}
+		if !allowedPath(ctx, path) {
+			return d, false, notFound(sql.ErrNoRows)
+		}
 		err = q.QueryRowContext(ctx, "SELECT id FROM paths WHERE path=?", path).Scan(&id)
 		if err != nil {
 			return d, false, notFound(err)
+		}
+	}
+	if access(ctx) != nil {
+		var current string
+		if err := q.QueryRowContext(ctx, "SELECT path FROM documents WHERE id=?", id).Scan(&current); err != nil {
+			return d, false, notFound(err)
+		}
+		if !allowedPath(ctx, current) {
+			return d, false, notFound(sql.ErrNoRows)
 		}
 	}
 	query := "SELECT snapshot FROM documents WHERE id=?"
@@ -190,6 +207,9 @@ func resolve(ctx context.Context, q querier, path, id string, revision int64) (a
 	if err := json.Unmarshal([]byte(raw), &d); err != nil {
 		return d, false, err
 	}
+	if !allowedPath(ctx, d.Path) {
+		return api.Document{}, false, notFound(sql.ErrNoRows)
+	}
 	return d, path != "" && path != d.Path, nil
 }
 func notFound(err error) error {
@@ -204,11 +224,22 @@ func (s *Store) Get(ctx context.Context, path, id string, revision int64) (api.R
 	if revision < 0 {
 		return api.Receipt{}, Invalid("revision must be positive")
 	}
-	d, alias, err := resolve(ctx, s.db, path, id, revision)
-	if err == nil {
-		_, err = s.db.ExecContext(ctx, "INSERT INTO activity VALUES(?,?) ON CONFLICT(id) DO UPDATE SET last_active=excluded.last_active", d.ID, time.Now().UTC().Format(time.RFC3339Nano))
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return api.Receipt{}, err
 	}
-	return receipt(d, path, id, alias), err
+	defer tx.Rollback()
+	d, alias, err := resolve(ctx, tx, path, id, revision)
+	if err != nil {
+		return api.Receipt{}, err
+	}
+	if _, err = tx.ExecContext(ctx, "INSERT INTO activity VALUES(?,?) ON CONFLICT(id) DO UPDATE SET last_active=excluded.last_active", d.ID, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		return api.Receipt{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return api.Receipt{}, err
+	}
+	return receipt(d, path, id, alias), nil
 }
 func receipt(d api.Document, path, id string, alias bool) api.Receipt {
 	ref := path
@@ -239,6 +270,9 @@ func (s *Store) checkBudget(extra int64) error {
 }
 func (s *Store) Mutate(ctx context.Context, actor, key string, m api.Mutation) (api.Receipt, error) {
 	var empty api.Receipt
+	if access(ctx) != nil {
+		return empty, &api.Error{Code: "forbidden", Message: "read-only credential"}
+	}
 	if actor == "" || key == "" || len(key) > 256 {
 		return empty, Invalid("idempotency key is required and must be at most 256 bytes")
 	}
@@ -433,6 +467,9 @@ func (s *Store) Mutate(ctx context.Context, actor, key string, m api.Mutation) (
 	return result, nil
 }
 func (s *Store) Backup(ctx context.Context, destination string) error {
+	if err := requireWrite(ctx); err != nil {
+		return err
+	}
 	if _, err := os.Stat(destination); err == nil {
 		return fmt.Errorf("backup destination exists")
 	}
@@ -446,6 +483,9 @@ func (s *Store) Backup(ctx context.Context, destination string) error {
 	return err
 }
 func (s *Store) Reindex(ctx context.Context) error {
+	if err := requireWrite(ctx); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	tx, err := s.db.BeginTx(ctx, nil)

@@ -21,7 +21,7 @@ The schema 2 search-row lookup reduced default-search p95 from **776.079 ms to 1
 
 First measured search was 1,011.943 ms before and 105.430 ms after. This is not a cold-cache measurement.
 
-The schema 2 binary was built from the source changes in the commit containing this report, whose parent is f1630be11d95073212d130e6daa21a061af6c572. Rerun with the published release commit to attribute subsequent measurements independently.
+In the original private source history, the schema 2 binary was built from the changes accompanying this report, whose parent was f1630be11d95073212d130e6daa21a061af6c572. Those commit references describe historical measurement provenance, not the clean public export's ancestry. Rerun with the published release commit to attribute subsequent measurements independently.
 
 Native SQLite diagnosis on this corpus: retrieving 10,000 matching FTS rowids took 9.450 ms; retrieving their unindexed document-ID column took 228.830 ms. The unindexed column sits beside large FTS content. An ordinary rowid-to-ID table removes that content access from candidate selection without capping exact/FTS matches or changing pagination.
 
