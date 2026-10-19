@@ -22,6 +22,7 @@ import (
 
 type Config struct {
 	TokensFile       string
+	OIDC             *OIDCVerifier
 	MaxDocumentBytes int64
 }
 type Server struct {
@@ -68,21 +69,35 @@ func readTokens(path string) (map[string]string, error) {
 	return tokens, nil
 }
 func ValidateTokens(path string) error { _, err := readTokens(path); return err }
-func (s *Server) actor(r *http.Request) (string, error) {
+func (s *Server) authenticate(r *http.Request) (principal, error) {
+	var p principal
+	header := r.Header.Get("Authorization")
+	if len(r.Header.Values("Authorization")) != 1 || !strings.HasPrefix(header, "Bearer ") {
+		return p, errors.New("missing token")
+	}
+	token := strings.TrimPrefix(header, "Bearer ")
+	if token == "" || len(token) > 8192 {
+		return p, errors.New("invalid token")
+	}
+	// Enabling OIDC reserves dotted bearers for JWT validation; a failed
+	// verification never falls through to operator-token comparison.
+	// Legacy-only mode retains the existing opaque-token contract.
+	if s.cfg.OIDC != nil && strings.Contains(token, ".") {
+		return s.cfg.OIDC.verify(r.Context(), token)
+	}
+	if s.cfg.TokensFile == "" {
+		return p, errors.New("operator credentials disabled")
+	}
 	tokens, e := readTokens(s.cfg.TokensFile)
 	if e != nil {
-		return "", e
-	}
-	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if token == r.Header.Get("Authorization") || token == "" {
-		return "", errors.New("missing token")
+		return p, e
 	}
 	for actor, want := range tokens {
 		if actor != "" && len(want) >= 32 && subtle.ConstantTimeCompare([]byte(want), []byte(token)) == 1 {
-			return actor, nil
+			return principal{actor: actor}, nil
 		}
 	}
-	return "", errors.New("invalid token")
+	return p, errors.New("invalid token")
 }
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.requests.Add(1)
@@ -92,12 +107,44 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 		return
 	}
-	actor, e := s.actor(r)
+	p, e := s.authenticate(r)
 	if e != nil {
 		s.fail(w, &api.Error{Code: "auth", Message: "authentication failed"})
 		return
 	}
+	actor := p.actor
+	if p.claims != nil {
+		allowed := r.Method == "GET"
+		switch r.URL.Path {
+		case "/v1/get", "/v1/list", "/v1/search", "/v1/history":
+		default:
+			allowed = false
+		}
+		if !allowed {
+			s.fail(w, &api.Error{Code: "forbidden", Message: "read-only credential"})
+			return
+		}
+		ctx, err := store.WithReadAccess(r.Context(), actor, p.claims.Projects)
+		if err != nil {
+			s.fail(w, &api.Error{Code: "auth", Message: "authentication failed"})
+			return
+		}
+		r = r.WithContext(ctx)
+	}
 	s.mu.Lock()
+	// Bound newly introduced OIDC subjects as well as existing static actors.
+	if len(s.rates) >= 4096 {
+		for key, rate := range s.rates {
+			if time.Since(rate.since) > time.Minute {
+				delete(s.rates, key)
+			}
+		}
+		if _, ok := s.rates[actor]; !ok && len(s.rates) >= 4096 {
+			s.mu.Unlock()
+			s.fail(w, &api.Error{Code: "rate_limited", Message: "request rate exceeded; retry later"})
+			return
+		}
+	}
 	rate := s.rates[actor]
 	if time.Since(rate.since) > time.Minute {
 		rate.since = time.Now()
@@ -300,6 +347,8 @@ func (s *Server) fail(w http.ResponseWriter, err error) {
 	switch ae.Code {
 	case "auth":
 		status = 401
+	case "forbidden":
+		status = 403
 	case "not_found":
 		status = 404
 	case "conflict", "cursor_expired", "idempotency_conflict":

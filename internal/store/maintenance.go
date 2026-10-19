@@ -9,6 +9,9 @@ import (
 )
 
 func (s *Store) ArchiveInactive(ctx context.Context, days int) (int, error) {
+	if err := requireWrite(ctx); err != nil {
+		return 0, err
+	}
 	if days < 1 {
 		return 0, Invalid("archive days must be positive")
 	}

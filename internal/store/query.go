@@ -18,6 +18,7 @@ type cursor struct {
 	Signature, After string
 	Maximum          int64
 	Offset           int
+	ScopedState      string `json:",omitempty"`
 }
 
 func encode(c cursor) string { b, _ := json.Marshal(c); return base64.RawURLEncoding.EncodeToString(b) }
@@ -204,23 +205,32 @@ func (s *Store) Page(ctx context.Context, f api.Filter, search bool) (api.Page, 
 	if f.Mode != "" && f.Mode != "default" && f.Mode != "literal" {
 		return p, Invalid("search mode must be default or literal")
 	}
+	if access(ctx) != nil && search {
+		f.Mode = "literal"
+	}
 	rawCursor := f.Cursor
 	f.Cursor = ""
 	signatureBytes, _ := json.Marshal(struct {
 		Filter api.Filter
 		Search bool
 	}{f, search})
-	signature := Hash(string(signatureBytes))
+	signature := s.cursorSignature(ctx, string(signatureBytes))
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return p, err
 	}
 	defer tx.Rollback()
 	var generation int64
-	if err = tx.QueryRowContext(ctx, "SELECT generation FROM state").Scan(&generation); err != nil {
+	var state string
+	if access(ctx) != nil {
+		state, err = scopedState(ctx, tx)
+	} else {
+		err = tx.QueryRowContext(ctx, "SELECT generation FROM state").Scan(&generation)
+	}
+	if err != nil {
 		return p, err
 	}
-	c := cursor{Generation: generation, Signature: signature}
+	c := cursor{Generation: generation, Signature: signature, ScopedState: state}
 	if rawCursor != "" {
 		c, err = decode(rawCursor)
 		if err != nil {
@@ -229,11 +239,12 @@ func (s *Store) Page(ctx context.Context, f api.Filter, search bool) (api.Page, 
 		if c.Signature != signature || c.Offset < 0 {
 			return p, Invalid("cursor filters do not match")
 		}
-		if c.Generation != generation {
+		if c.Generation != generation || c.ScopedState != state {
 			return p, &api.Error{Code: "cursor_expired", Message: "documents changed; restart enumeration"}
 		}
 	}
 	where, args := filterSQL(f, search)
+	where, args = readFilter(ctx, where, args, "path")
 	q := strings.ToLower(f.Query)
 	defaultSearch := search && f.Mode != "literal"
 	budget := f.Limit
@@ -293,6 +304,9 @@ func (s *Store) Page(ctx context.Context, f api.Filter, search bool) (api.Page, 
 			// A literal scan is not a ranking; it walks documents in ID order
 			// because that is the total order its cursor pages through.
 			p.Ranking = "literal"
+			if access(ctx) != nil {
+				p.RankingReason = "project_scope"
+			}
 		}
 		where += " AND id>?"
 		args = append(args, c.After, budget+1)
@@ -352,7 +366,8 @@ func (s *Store) Page(ctx context.Context, f api.Filter, search bool) (api.Page, 
 				matched = strings.Contains(strings.ToLower(x.path), q) || strings.Contains(strings.ToLower(x.title), q)
 				if !matched {
 					var count int
-					if err = tx.QueryRowContext(ctx, "SELECT count(*) FROM paths WHERE id=? AND instr(lower(path),?)>0", x.id, q).Scan(&count); err != nil {
+					aliasWhere, aliasArgs := readFilter(ctx, "id=? AND instr(lower(path),?)>0", []any{x.id, q}, "path")
+					if err = tx.QueryRowContext(ctx, "SELECT count(*) FROM paths WHERE "+aliasWhere, aliasArgs...).Scan(&count); err != nil {
 						return p, err
 					}
 					matched = count > 0
@@ -446,11 +461,16 @@ func (s *Store) History(ctx context.Context, path, id string, limit int, rawCurs
 	if limit < 1 || limit > 200 {
 		return p, Invalid("limit must be 1..200")
 	}
-	d, _, err := resolve(ctx, s.db, path, id, 0)
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return p, err
 	}
-	signature := Hash(fmt.Sprintf("history:%s:%d", d.ID, limit))
+	defer tx.Rollback()
+	d, _, err := resolve(ctx, tx, path, id, 0)
+	if err != nil {
+		return p, err
+	}
+	signature := s.cursorSignature(ctx, fmt.Sprintf("history:%s:%d", d.ID, limit))
 	c := cursor{Signature: signature, Maximum: d.Revision}
 	if rawCursor != "" {
 		c, err = decode(rawCursor)
@@ -468,7 +488,9 @@ func (s *Store) History(ctx context.Context, path, id string, limit int, rawCurs
 			return p, Invalid("invalid history cursor")
 		}
 	}
-	rows, err := s.db.QueryContext(ctx, "SELECT json_remove(snapshot,'$.content') FROM revisions WHERE id=? AND revision>? AND revision<=? ORDER BY revision LIMIT ?", d.ID, after, c.Maximum, limit+1)
+	where, args := readFilter(ctx, "id=? AND revision>? AND revision<=?", []any{d.ID, after, c.Maximum}, "json_extract(snapshot,'$.path')")
+	args = append(args, limit+1)
+	rows, err := tx.QueryContext(ctx, "SELECT json_remove(snapshot,'$.content') FROM revisions WHERE "+where+" ORDER BY revision LIMIT ?", args...)
 	if err != nil {
 		return p, err
 	}
