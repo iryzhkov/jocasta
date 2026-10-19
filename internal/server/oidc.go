@@ -53,6 +53,9 @@ type tokenClaims struct {
 	jwt.RegisteredClaims
 	Scope    string   `json:"scope"`
 	Projects []string `json:"jocasta_projects"`
+	// Only MCP defers read-scope refusal until after signature validation, so
+	// the transport can distinguish insufficient_scope (403) from bad JWTs.
+	allowMissingRead bool
 }
 
 func (c *tokenClaims) Validate() error {
@@ -67,7 +70,7 @@ func (c *tokenClaims) Validate() error {
 			hasRead = true
 		}
 	}
-	if !hasRead {
+	if !hasRead && !c.allowMissingRead {
 		return errors.New("missing read scope")
 	}
 	_, err := store.WithReadAccess(context.Background(), "validate", c.Projects)
@@ -80,11 +83,20 @@ type principal struct {
 }
 
 func (v *OIDCVerifier) verify(ctx context.Context, raw string) (principal, error) {
+	return v.verifyToken(ctx, raw, v.cfg.Audience, false)
+}
+
+// MCP requires the canonical resource audience; REST retains its configured audience.
+func (v *OIDCVerifier) verifyAudience(ctx context.Context, raw, audience string) (principal, error) {
+	return v.verifyToken(ctx, raw, audience, true)
+}
+
+func (v *OIDCVerifier) verifyToken(ctx context.Context, raw, audience string, allowMissingRead bool) (principal, error) {
 	var p principal
 	if len(raw) > 8192 {
 		return p, errors.New("token exceeds limit")
 	}
-	c := new(tokenClaims)
+	c := &tokenClaims{allowMissingRead: allowMissingRead}
 	token, err := jwt.ParseWithClaims(raw, c, func(t *jwt.Token) (any, error) {
 		// Refuse unusable claims before network work. The library validates the
 		// signed registered claims after verifying RS256.
@@ -93,7 +105,7 @@ func (v *OIDCVerifier) verify(ctx context.Context, raw string) (principal, error
 		}
 		matched := false
 		for _, a := range c.Audience {
-			if a == v.cfg.Audience {
+			if a == audience {
 				matched = true
 			}
 		}
@@ -106,7 +118,7 @@ func (v *OIDCVerifier) verify(ctx context.Context, raw string) (principal, error
 		}
 		return v.key(ctx, kid)
 	}, jwt.WithValidMethods([]string{"RS256"}), jwt.WithIssuer(v.cfg.Issuer),
-		jwt.WithAudience(v.cfg.Audience), jwt.WithExpirationRequired(), jwt.WithIssuedAt(),
+		jwt.WithAudience(audience), jwt.WithExpirationRequired(), jwt.WithIssuedAt(),
 		jwt.WithLeeway(tokenLeeway), jwt.WithTimeFunc(v.now), jwt.WithStrictDecoding())
 	if err != nil || !token.Valid {
 		return p, errors.New("invalid token")
