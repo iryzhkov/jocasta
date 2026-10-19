@@ -145,7 +145,7 @@ No username or app password is sent. The provider-secret path creates or updates
 `ak-<provider.name>-client_credentials`; precreate that exact ordinary service
 account without roles, groups, permissions or login credentials, then bind only
 that account to the dedicated application before connecting its provider.
-`token.py:create_client_credentials_response` returns access-token metadata
+`views/token.py:create_client_credentials_response` returns access-token metadata
 without a refresh token. The helper makes no admin API call. Disable the
 provider grant or detach the application to stop issuance; account disablement
 alone is not qualified for this generated-account path.
