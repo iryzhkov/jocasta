@@ -140,37 +140,42 @@ files and change its own programs/configuration.
 The issuance contract is Authentik 2026.8.4, source commit
 `410f46e5cf18f97a1f0056b30984a145242df55d`. Its
 `token/client_credentials.py` accepts form `grant_type=client_credentials`,
-`client_id`, `username`, `password=<app password>` and `scope=jocasta.read`.
+`client_id`, `client_secret=<dedicated provider secret>` and `scope=jocasta.read`.
+No username or app password is sent. The provider-secret path creates or updates
+`ak-<provider.name>-client_credentials`; precreate that exact ordinary service
+account without roles, groups, permissions or login credentials, then bind only
+that account to the dedicated application before connecting its provider.
 `token.py:create_client_credentials_response` returns access-token metadata
-without a refresh token. Use an ordinary machine account's app password.
-There is no provider client-secret auto-account flow or admin API call.
+without a refresh token. The helper makes no admin API call. Disable the
+provider grant or detach the application to stop issuance; account disablement
+alone is not qualified for this generated-account path.
 
 After separate enrollment approval, provision a protected JSON file with exactly
 these fields. All paths must be absolute and normalized, without symlink
-components. Example public settings and password-file reference only:
+components. Example public settings and credential-file reference only:
 
 ```json
 {
   "expected_issuer": "https://auth.example/application/o/jocasta-canary/",
   "client_id": "jocasta-canary",
   "token_url": "https://auth.example/application/o/token/",
-  "username": "canary-machine",
-  "password_file": "/home/operator/.cache/jocasta-authentik-live-canary/app-password",
+  "client_secret_file": "/home/operator/.cache/jocasta-authentik-live-canary/client-secret",
   "private_dir": "/home/operator/.cache/jocasta-authentik-live-canary",
   "jocasta_binary": "/home/operator/reviewed-bin/jocasta",
   "jocasta_url": "http://127.0.0.1:18081"
 }
 ```
 
-Set the existing private directory to 0700. The helper config and password file
+Set the existing private directory to 0700. The helper config and client-secret file
 must be owned by the invoking user, regular, single-link files at 0400 or 0600.
-The password file contains only the app password, optionally followed by one
-newline. Never put a literal password in JSON, argv, environment, logs or
+The client-secret file contains only the dedicated provider secret, optionally followed by one
+newline. Never put a literal secret in JSON, argv, environment, logs or
 evidence. Provision it through the separately approved private enrollment
 procedure. Never copy seed/operator/static tokens into the helper.
 
 Pin the approved issuer and client ID in this config and configure Jocasta's
-server issuer/audience to those same values. The token URL must be exact HTTPS,
+server issuer/audience to those same values. `expected_issuer` checks only the
+helper token URL origin; the server enforces the complete signed issuer. The token URL must be exact HTTPS,
 on the issuer's origin, without URL credentials, query or fragment. The helper
 uses system TLS trust, no proxies, redirects, discovery or retries, and a
 10-second total request deadline with a 32-KiB response limit. It requires a
@@ -189,9 +194,11 @@ The helper atomically replaces `private_dir/read-token` at 0600, then generates
 `allow_loopback_http:true` and that exact token-file path. Existing outputs must
 also be owner-only regular single-link files at 0600; symlinks and unsafe types
 or modes are refused. Jocasta's URL must be a literal `http://127.0.0.1:PORT`
-or `http://[::1]:PORT` origin. No arbitrary URL, path, CA or credential override
-is accepted. The reviewed binary must be an absolute regular executable without
-symlink components or group/world write permission.
+or `http://[::1]:PORT` origin. No CLI URL, path or credential override
+is accepted. Launch Python with the scrubbed environment below to avoid inherited
+CA and Python environment overrides. The reviewed binary must be an absolute regular executable without
+symlink components or group/world write permission. Verify its approved SHA-256
+before the live exercise.
 
 The launcher execs only that binary with the generated `--config` path, a small
 public environment and the supplied command. HOME/TMPDIR point to the private
@@ -207,11 +214,15 @@ Use `ls`, the actual CLI verb, for listing.
 After approval, from this source tree with the private config path substituted:
 
 ```sh
-python3 scripts/authentik_canary_client.py "$CANARY_DIR/helper.json" get canaryA/allowed
-python3 scripts/authentik_canary_client.py "$CANARY_DIR/helper.json" exists canaryB/denied --json
-python3 scripts/authentik_canary_client.py "$CANARY_DIR/helper.json" ls --json
-python3 scripts/authentik_canary_client.py "$CANARY_DIR/helper.json" search denied-marker --json
-printf 'blocked\n' | python3 scripts/authentik_canary_client.py "$CANARY_DIR/helper.json" put canaryA/allowed --if-revision 1 --file -
+canary_client() {
+  env -i HOME="$CANARY_DIR" TMPDIR="$CANARY_DIR" PATH=/usr/bin:/bin \
+    /usr/bin/python3 -I scripts/authentik_canary_client.py "$CANARY_DIR/helper.json" "$@"
+}
+canary_client get canaryA/allowed
+canary_client exists canaryB/denied --json
+canary_client ls --json
+canary_client search denied-marker --json
+printf 'blocked\n' | canary_client put canaryA/allowed --if-revision 1 --file -
 ```
 
 Expect exact allowed content, exists false/exit 2, only canaryA listed, no denied
@@ -239,8 +250,10 @@ chaldea exec --host agent-a -- sh -ceu '
 
 ## Live enrollment packet, pending
 
-A separate provisioning identity must approve one ordinary nonadmin machine
-account and one dedicated OAuth2/OIDC provider/application. Do not reuse existing
+The separately approved provisioning procedure creates one ordinary nonadmin machine
+account and one dedicated OAuth2/OIDC provider/application. Use only the
+provider-specific client-credentials grant. Keep the exact-account application
+binding until the provider/application has been disconnected during cleanup. Do not reuse existing
 human SSO applications. The ordinary account must have no admin/superuser groups, global write
 permissions, token/key viewing rights or ability to edit its entitlement mapping.
 Provisioning credentials and signing keys stay outside both runtime and helper.
@@ -253,11 +266,14 @@ than browser ID tokens. Confirm claim types and whether the machine flow uses a
 client-associated sub; establish its stability before treating it as a user ID.
 Human SSO success does not qualify machine tokens.
 
-Live acceptance still needs real five-minute issuance, wrong audience/issuer,
-future iat/nbf, expiry with skew, renewal, entitlement removal, attempted grant
-expansion and JWKS rotation checks. Exercise both projects through paths, IDs,
+First live acceptance needs real five-minute issuance, allowed/denied project
+calls, write denial, wrong verifier audience/issuer, fresh reacquisition after
+five minutes and issuance refusal after disabling the provider grant. Signed
+claim inspection, old-token replay, future iat/nbf, requested-scope expansion,
+key rotation and Authentik admin-denial probes require separate reviewed tools
+and remain deferred. Exercise both projects through paths, IDs,
 aliases, historical revisions, ranges, exists/diff, archived data, all search
 modes, cursors and every mutation. Verify denied requests leave no document,
-revision, receipt or activity writes. Confirm separately that the machine cannot
-administer Authentik, inspect signing keys or view others' tokens. Stop at
+revision, receipt or activity writes. Administrative rights must be absent by enrollment configuration; live API
+negative probes remain unqualified until reviewed tooling exists. Stop at
 disposable data until these prerequisites pass. No installed hosts were changed.

@@ -17,7 +17,7 @@ MAX_RESPONSE = 32768
 MAX_TOKEN = 16384
 TIMEOUT = 10
 CONFIG_KEYS = {
-    "expected_issuer", "client_id", "token_url", "username", "password_file",
+    "expected_issuer", "client_id", "token_url", "client_secret_file",
     "private_dir", "jocasta_binary", "jocasta_url",
 }
 # Deliberately smaller than the CLI's global flagset. No local output files.
@@ -120,11 +120,11 @@ def load_config(path):
         "http://[::1]:" + str(server.port),
     ) and server.port is not None and 1 <= server.port <= 65535,
             "Jocasta URL must be a literal loopback HTTP origin with an explicit port")
-    for name in ("password_file", "private_dir", "jocasta_binary"):
+    for name in ("client_secret_file", "private_dir", "jocasta_binary"):
         absolute(config[name])
     outputs = {config["private_dir"] + "/" + name
                for name in ("read-token", "read-client.json")}
-    require(not outputs.intersection({absolute(path), config["password_file"],
+    require(not outputs.intersection({absolute(path), config["client_secret_file"],
                                       config["jocasta_binary"]}),
             "output paths must not replace inputs")
     return config
@@ -199,14 +199,14 @@ def post_token(url, form):
 def acquire(config):
     # Neither exceptions nor response bodies escape this boundary.
     try:
-        password = read_private(config["password_file"], 4096).decode("utf-8")
-        if password.endswith("\n"):
-            password = password[:-1]
-        require(password and not any(ord(c) < 32 or ord(c) == 127 for c in password),
-                "invalid password file")
+        client_secret = read_private(config["client_secret_file"], 4096).decode("utf-8")
+        if client_secret.endswith("\n"):
+            client_secret = client_secret[:-1]
+        require(client_secret and not any(ord(c) < 32 or ord(c) == 127 for c in client_secret),
+                "invalid client secret file")
         form = urllib.parse.urlencode({
             "grant_type": "client_credentials", "client_id": config["client_id"],
-            "username": config["username"], "password": password, "scope": "jocasta.read",
+            "client_secret": client_secret, "scope": "jocasta.read",
         }).encode("utf-8")
         data = post_token(config["token_url"], form)
         require(len(data) <= MAX_RESPONSE, "token response exceeds size limit")
