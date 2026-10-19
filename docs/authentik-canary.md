@@ -129,26 +129,113 @@ jocastad serve --db "$CANARY_DIR/disposable.db" --listen 127.0.0.1:18081 \
 This backend is loopback-only. Remote clients require the existing TLS ingress;
 deployment is outside this task. Issuer/JWKS HTTPS verification always applies.
 
-A separately approved private credential helper must acquire an access JWT and
-atomically write $CANARY_DIR/read-token at mode 0600 under the 0700 directory.
-No helper implementation or enrollment is included here. Store its machine
-credential privately; no bearer/secret argv, shell tracing, environment dumps,
-logs or evidence. The helper needs no admin API permission. Never give the
-limited client the seed operator credential. Then exercise the existing CLI:
+### Private helper
+
+`scripts/authentik_canary_client.py` is a Python 3 stdlib launcher for this
+operator-only canary. Enrollment and any live invocation still require the
+protected packet below. It is not a production broker, shared auth framework,
+MCP client or process isolation boundary. A trusted operator can read its own
+files and change its own programs/configuration.
+
+The issuance contract is Authentik 2026.8.4, source commit
+`410f46e5cf18f97a1f0056b30984a145242df55d`. Its
+`token/client_credentials.py` accepts form `grant_type=client_credentials`,
+`client_id`, `username`, `password=<app password>` and `scope=jocasta.read`.
+`token.py:create_client_credentials_response` returns access-token metadata
+without a refresh token. Use an ordinary machine account's app password.
+There is no provider client-secret auto-account flow or admin API call.
+
+After separate enrollment approval, provision a protected JSON file with exactly
+these fields. All paths must be absolute and normalized, without symlink
+components. Example public settings and password-file reference only:
+
+```json
+{
+  "expected_issuer": "https://auth.example/application/o/jocasta-canary/",
+  "client_id": "jocasta-canary",
+  "token_url": "https://auth.example/application/o/token/",
+  "username": "canary-machine",
+  "password_file": "/home/operator/.cache/jocasta-authentik-live-canary/app-password",
+  "private_dir": "/home/operator/.cache/jocasta-authentik-live-canary",
+  "jocasta_binary": "/home/operator/reviewed-bin/jocasta",
+  "jocasta_url": "http://127.0.0.1:18081"
+}
+```
+
+Set the existing private directory to 0700. The helper config and password file
+must be owned by the invoking user, regular, single-link files at 0400 or 0600.
+The password file contains only the app password, optionally followed by one
+newline. Never put a literal password in JSON, argv, environment, logs or
+evidence. Provision it through the separately approved private enrollment
+procedure. Never copy seed/operator/static tokens into the helper.
+
+Pin the approved issuer and client ID in this config and configure Jocasta's
+server issuer/audience to those same values. The token URL must be exact HTTPS,
+on the issuer's origin, without URL credentials, query or fragment. The helper
+uses system TLS trust, no proxies, redirects, discovery or retries, and a
+10-second total request deadline with a 32-KiB response limit. It requires a
+nonempty bearer access token of at most 16 KiB, integer `expires_in` from 1 to
+300 and exactly `scope=jocasta.read`. It ignores ID/refresh-token fields.
+
+Each invocation acquires a fresh access token. This provides automatic renewal
+without a refresh token or cache protocol. Acquisition failure prevents CLI
+execution even when an old token file remains. The helper treats tokens as
+opaque. It does not verify JWT signatures or claims, and response metadata is
+not proof of token issuer/audience/expiry. Jocasta's verifier must enforce the
+signed issuer, audience, expiry and project bounds described above.
+
+The helper atomically replaces `private_dir/read-token` at 0600, then generates
+`private_dir/read-client.json` at 0600 with only the configured loopback URL,
+`allow_loopback_http:true` and that exact token-file path. Existing outputs must
+also be owner-only regular single-link files at 0600; symlinks and unsafe types
+or modes are refused. Jocasta's URL must be a literal `http://127.0.0.1:PORT`
+or `http://[::1]:PORT` origin. No arbitrary URL, path, CA or credential override
+is accepted. The reviewed binary must be an absolute regular executable without
+symlink components or group/world write permission.
+
+The launcher execs only that binary with the generated `--config` path, a small
+public environment and the supplied command. HOME/TMPDIR point to the private
+directory for local CLI state; that is not process isolation. Do not run
+concurrent same-user modifications during the exercise. Read commands are
+`get`, `exists`, `ls`, `search`, `history` and `diff`, plus `put` for the
+write-denial exercise. The wrapper accepts a fixed subset of each command's
+options from `internal/cli/cli.go` and `help.go`. Use long options after the
+verb. Config/credential/URL overrides, unknown or duplicate options, local
+output options and arbitrary programs are refused; `put` requires `--file -`.
+Use `ls`, the actual CLI verb, for listing.
+
+After approval, from this source tree with the private config path substituted:
 
 ```sh
-jocasta --config "$CANARY_DIR/read-client.json" get canaryA/allowed
-jocasta --config "$CANARY_DIR/read-client.json" exists canaryB/denied --json
-jocasta --config "$CANARY_DIR/read-client.json" list --json
-jocasta --config "$CANARY_DIR/read-client.json" search denied-marker --json
-printf 'blocked\n' | jocasta --config "$CANARY_DIR/read-client.json" put canaryA/allowed --if-revision 1 --file -
+python3 scripts/authentik_canary_client.py "$CANARY_DIR/helper.json" get canaryA/allowed
+python3 scripts/authentik_canary_client.py "$CANARY_DIR/helper.json" exists canaryB/denied --json
+python3 scripts/authentik_canary_client.py "$CANARY_DIR/helper.json" ls --json
+python3 scripts/authentik_canary_client.py "$CANARY_DIR/helper.json" search denied-marker --json
+printf 'blocked\n' | python3 scripts/authentik_canary_client.py "$CANARY_DIR/helper.json" put canaryA/allowed --if-revision 1 --file -
 ```
 
 Expect exact allowed content, exists false/exit 2, only canaryA listed, no denied
 marker and write HTTP 403. Complete incomplete search pages before declaring
-absence. The CLI loads its token file per invocation and does no OAuth refresh.
-Refresh through the private helper, then invoke again. Retain sanitized outcomes,
-status codes and lifetime numbers only.
+absence. Successful exec preserves the CLI's exit code. Helper failures print
+one fixed diagnostic and exit 1 without exception text or response bodies.
+Retain sanitized outcomes, status codes and lifetime numbers only.
+
+Run the synthetic helper suite on agent-a. This asserts the scratch HOME before
+creating fixtures; no fixture uses real credentials or a real login:
+
+```sh
+chaldea exec --host agent-a -- sh -ceu '
+  exec env HOME="${PWD%/}/.cache/authentik-helper-home" \
+    TMPDIR="${PWD%/}/.cache/authentik-helper-home/tmp" \
+    PYTHONDONTWRITEBYTECODE=1 sh -ceu '\''
+      test "$HOME" = "${PWD%/}/.cache/authentik-helper-home"
+      test "$TMPDIR" = "$HOME/tmp"
+      umask 077
+      mkdir -p "$TMPDIR"
+      python3 -m unittest discover -s scripts -p test_authentik_canary_client.py -v
+    '\''
+'
+```
 
 ## Live enrollment packet, pending
 
