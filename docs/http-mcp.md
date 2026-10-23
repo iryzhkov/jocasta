@@ -137,16 +137,14 @@ a denied sibling. Confirm a newly issued test token's sanitized audience/resourc
 scope, lifetime and project claims against this policy. A client-ID-only JWT must
 not be accepted merely to make the test pass.
 
-Actual Authentik acceptance of this resource audience is pending. Client helper
-configuration, credential retrieval/issuance, installed runtime behavior after a
-401, and T3's arbitrary external MCP configuration are separate qualification
-steps owned by the parent. The server's protocol, bearer verification, resource audience and project ACLs are
-provider-independent. Codex, Claude Code and OpenCode each require separate
-connection, private token acquisition and renewal qualification; all three are
-pending. Upstream Codex helper source capability is a candidate only and does not
-select an exclusive client or prove any installed runtime or T3 seam. Compatibility
-must not widen audiences, grants or operator access. This milestone makes no
-deployed T3, login, renewal, host-convergence, or hosted-CI claim.
+The disposable qualification above passed real Authentik resource audiences,
+private credential acquisition and the selected official T3/native Claude and
+Codex connections. Renewal during those composed runs, reboot recovery and
+persistent host convergence remain separate acceptance checks. OpenCode is
+deferred. The server's protocol, bearer verification, resource audience and
+project ACLs are provider-independent. Compatibility must not widen audiences,
+grants or operator access; a client's source capability alone proves no installed
+runtime or exclusive tool boundary.
 
 Protocol references:
 [MCP authorization 2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization)
