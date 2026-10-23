@@ -105,7 +105,9 @@ The HTTP listener is for a restricted TLS ingress, not direct public exposure.
 
 An opt-in [HTTP MCP reader](docs/http-mcp.md) exposes get/list/search/history with
 per-request project grants and a resource-specific JWT audience. It is disabled
-by default; Authentik resource audience and client/T3 runtime qualification remain pending.
+by default. Disposable Authentik/Claude/Codex/T3 canaries passed the composed
+read-only path; the HTTP MCP guide records exact evidence and remaining
+qualification limits. Persistent activation is a separate deployment step.
 
 See [the operator guide](docs/operations.md), [API contract](docs/api.md), and
 [original design](docs/design-plan.md). The current 30-day archive policy and

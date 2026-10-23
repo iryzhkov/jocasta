@@ -43,6 +43,14 @@ entry. Never print tokens or add them to a release manifest.
 Configuration: `JOCASTA_DB`, `JOCASTA_LISTEN`, `JOCASTA_TOKENS_FILE`,
 `JOCASTA_MAX_DOCUMENT_BYTES`, `JOCASTA_MAX_STORAGE_BYTES`,
 `JOCASTA_MIN_FREE_BYTES`, `JOCASTA_ARCHIVE_AFTER_DAYS`.
+Optional project-scoped JWT reads require all three of `JOCASTA_OIDC_ISSUER`,
+`JOCASTA_OIDC_AUDIENCE` and `JOCASTA_OIDC_JWKS_URL`. To enable the read-only
+HTTP MCP surface, also set `JOCASTA_MCP_RESOURCE_URL` to its exact canonical
+HTTPS `/mcp` URL. Keep the existing static token file for operator REST access;
+static tokens are not accepted by MCP. See [HTTP MCP](http-mcp.md) for trust,
+ingress and claim requirements. Both optional authentication paths are disabled
+by default.
+
 Defaults reserve 1 GiB free space, cap storage at 10 GiB, and archive after
 30 inactive days. Monitor capacity and errors; no historical deletion occurs.
 

@@ -6,10 +6,16 @@ The annotated tag `25cb00203c6b693780f602ab4041c06f7f4b9570` resolves to
 `bc72835f62eb94d0fb484439f886b6885b075f36`. The dependency and its module checksums
 are pinned in go.mod/go.sum; its Go requirement is 1.25.0, matching Jocasta.
 
-This is a source milestone with synthetic issuer proof. Actual Authentik resource
-audience behavior, installed client renewal, and T3 third-party MCP wiring remain
-unqualified. No enrollment, token acquisition, proxy, refresher, or client code is
-part of this adapter.
+Disposable Claude and Codex canaries passed the composed Authentik → HTTPS MCP →
+official T3 native client → Chaldea result/status/wake path. The Codex run
+`e3330681015e4026aaa786a223a31684` exercised 38 calls with allowed-project reads,
+denied-sibling reads and filtered enumerations, then completed cleanup. Exact
+receipts and remaining limits are recorded in
+`jocasta:405dc259d4563fba09a7f2aa9fa6d58e@465` and the authoring guide
+`jocasta:38a63cf8918eebae2dd7c8911eacd89c@31`.
+These results do not establish persistent deployment, natural renewal during the
+composed run, reboot recovery or exclusive native tool isolation. Enrollment,
+credential acquisition and proxy configuration remain outside this adapter.
 
 ## Configuration
 
