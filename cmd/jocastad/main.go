@@ -48,6 +48,11 @@ func main() {
 	db := fs.String("db", env("JOCASTA_DB", "/data/jocasta.db"), "local SQLite database")
 	listen := fs.String("listen", env("JOCASTA_LISTEN", ":8080"), "HTTP listen address; restrict to TLS ingress")
 	tokens := fs.String("tokens-file", env("JOCASTA_TOKENS_FILE", "/run/secrets/jocasta-tokens.json"), "JSON object mapping actors to bearer tokens")
+	oidcIssuer := fs.String("oidc-issuer", env("JOCASTA_OIDC_ISSUER", ""), "exact trusted HTTPS OIDC issuer")
+	oidcAudience := fs.String("oidc-audience", env("JOCASTA_OIDC_AUDIENCE", ""), "required JWT audience")
+	oidcJWKS := fs.String("oidc-jwks-url", env("JOCASTA_OIDC_JWKS_URL", ""), "pinned HTTPS JWKS URL; no discovery")
+	mcpResource := fs.String("mcp-resource-url", env("JOCASTA_MCP_RESOURCE_URL", ""), "opt-in canonical HTTPS MCP resource URL ending in /mcp")
+	mcpLoopback := fs.Bool("mcp-allow-loopback-http", false, "allow loopback HTTP MCP resource for disposable fixtures")
 	output := fs.String("output", "", "new backup database path")
 	days := fs.Int("days", int(number("JOCASTA_ARCHIVE_AFTER_DAYS", 30)), "inactivity days before archival")
 	fs.Parse(args)
@@ -81,10 +86,28 @@ func main() {
 		fmt.Printf("archived %d documents\n", n)
 		return
 	}
-	if err = server.ValidateTokens(*tokens); err != nil {
-		log.Fatal(err)
+	var oidc *server.OIDCVerifier
+	if *oidcIssuer != "" || *oidcAudience != "" || *oidcJWKS != "" {
+		oidc, err = server.NewOIDC(server.OIDCConfig{Issuer: *oidcIssuer, Audience: *oidcAudience, JWKSURL: *oidcJWKS})
+		if err != nil {
+			log.Fatal(err)
+		}
 	}
-	handler := server.New(s, server.Config{TokensFile: *tokens, MaxDocumentBytes: cfg.MaxDocumentBytes})
+	if *tokens != "" {
+		if err = server.ValidateTokens(*tokens); err != nil {
+			log.Fatal(err)
+		}
+	} else if oidc == nil {
+		log.Fatal("at least one authentication method is required")
+	}
+	handler := server.New(s, server.Config{TokensFile: *tokens, OIDC: oidc, MaxDocumentBytes: cfg.MaxDocumentBytes})
+	if *mcpResource != "" {
+		if err = handler.EnableMCP(*mcpResource, *mcpLoopback); err != nil {
+			log.Fatal(err)
+		}
+	} else if *mcpLoopback {
+		log.Fatal("--mcp-allow-loopback-http requires --mcp-resource-url")
+	}
 	srv := &http.Server{Addr: *listen, Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 45 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16384}
 	go func() {
 		<-ctx.Done()

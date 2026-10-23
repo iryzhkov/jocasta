@@ -4,6 +4,7 @@ on:
     branches: [main]
     tags: ['v*']
   pull_request:
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
@@ -15,7 +16,15 @@ jobs:
         with:
           go-version-file: go.mod
       - run: make check test cross
-      - run: docker build -t jocasta:test .
+      - run: docker build --build-arg COMMIT="$GITHUB_SHA" -t jocasta:test .
+      - name: Retain the checked image for explicit deployment
+        run: docker save jocasta:test -o "$RUNNER_TEMP/jocasta-image.tar"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: jocasta-image
+          path: ${{ runner.temp }}/jocasta-image.tar
+          compression-level: 0
+          retention-days: 14
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: test

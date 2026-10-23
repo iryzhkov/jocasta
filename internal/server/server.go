@@ -22,6 +22,7 @@ import (
 
 type Config struct {
 	TokensFile       string
+	OIDC             *OIDCVerifier
 	MaxDocumentBytes int64
 }
 type Server struct {
@@ -32,6 +33,11 @@ type Server struct {
 	requests, failures atomic.Uint64
 	mu                 sync.Mutex
 	rates              map[string]rate
+	mcp                http.Handler
+	mcpAuth            http.Handler
+	mcpMetadata        http.Handler
+	mcpResource        string
+	mcpOrigin          string
 }
 type rate struct {
 	since time.Time
@@ -68,21 +74,38 @@ func readTokens(path string) (map[string]string, error) {
 	return tokens, nil
 }
 func ValidateTokens(path string) error { _, err := readTokens(path); return err }
-func (s *Server) actor(r *http.Request) (string, error) {
+func (s *Server) authenticate(r *http.Request) (principal, error) {
+	var p principal
+	header := r.Header.Get("Authorization")
+	if len(r.Header.Values("Authorization")) != 1 || !strings.HasPrefix(header, "Bearer ") {
+		return p, errors.New("missing token")
+	}
+	token := strings.TrimPrefix(header, "Bearer ")
+	if token == "" || len(token) > 8192 {
+		return p, errors.New("invalid token")
+	}
+	// Enabling OIDC reserves dotted bearers for JWT validation; a failed
+	// verification never falls through to operator-token comparison.
+	// Legacy-only mode retains the existing opaque-token contract.
+	if s.cfg.OIDC != nil && strings.Contains(token, ".") {
+		if r.URL.Path == "/mcp" {
+			return s.cfg.OIDC.verifyAudience(r.Context(), token, s.mcpResource)
+		}
+		return s.cfg.OIDC.verify(r.Context(), token)
+	}
+	if s.cfg.TokensFile == "" {
+		return p, errors.New("operator credentials disabled")
+	}
 	tokens, e := readTokens(s.cfg.TokensFile)
 	if e != nil {
-		return "", e
-	}
-	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if token == r.Header.Get("Authorization") || token == "" {
-		return "", errors.New("missing token")
+		return p, e
 	}
 	for actor, want := range tokens {
 		if actor != "" && len(want) >= 32 && subtle.ConstantTimeCompare([]byte(want), []byte(token)) == 1 {
-			return actor, nil
+			return principal{actor: actor}, nil
 		}
 	}
-	return "", errors.New("invalid token")
+	return p, errors.New("invalid token")
 }
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.requests.Add(1)
@@ -92,12 +115,67 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 		return
 	}
-	actor, e := s.actor(r)
+	if s.mcpMetadata != nil && r.URL.Path == "/.well-known/oauth-protected-resource/mcp" {
+		s.mcpMetadata.ServeHTTP(w, r)
+		return
+	}
+	if r.URL.Path == "/mcp" {
+		if s.mcpAuth == nil {
+			http.NotFound(w, r)
+			return
+		}
+		// Compare against configured public origin, never forwarded headers or Host.
+		origins := r.Header.Values("Origin")
+		if len(origins) > 1 || (len(origins) == 1 && origins[0] != s.mcpOrigin) {
+			http.Error(w, "origin forbidden", http.StatusForbidden)
+			return
+		}
+		s.mcpAuth.ServeHTTP(mcpAuthResponse{w}, r)
+		return
+	}
+	p, e := s.authenticate(r)
 	if e != nil {
 		s.fail(w, &api.Error{Code: "auth", Message: "authentication failed"})
 		return
 	}
+	s.serveAuthenticated(w, r, p)
+}
+
+func (s *Server) serveAuthenticated(w http.ResponseWriter, r *http.Request, p principal) {
+	actor := p.actor
+	if p.claims != nil {
+		allowed := r.URL.Path == "/mcp" && s.mcp != nil
+		if r.Method == "GET" {
+			switch r.URL.Path {
+			case "/v1/get", "/v1/list", "/v1/search", "/v1/history":
+				allowed = true
+			}
+		}
+		if !allowed {
+			s.fail(w, &api.Error{Code: "forbidden", Message: "read-only credential"})
+			return
+		}
+		ctx, err := store.WithReadAccess(r.Context(), actor, p.claims.Projects)
+		if err != nil {
+			s.fail(w, &api.Error{Code: "auth", Message: "authentication failed"})
+			return
+		}
+		r = r.WithContext(ctx)
+	}
 	s.mu.Lock()
+	// Bound newly introduced OIDC subjects as well as existing static actors.
+	if len(s.rates) >= 4096 {
+		for key, rate := range s.rates {
+			if time.Since(rate.since) > time.Minute {
+				delete(s.rates, key)
+			}
+		}
+		if _, ok := s.rates[actor]; !ok && len(s.rates) >= 4096 {
+			s.mu.Unlock()
+			s.fail(w, &api.Error{Code: "rate_limited", Message: "request rate exceeded; retry later"})
+			return
+		}
+	}
 	rate := s.rates[actor]
 	if time.Since(rate.since) > time.Minute {
 		rate.since = time.Now()
@@ -124,9 +202,28 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, store.Invalid("query exceeds 8192 bytes"))
 		return
 	}
+	if r.URL.Path == "/mcp" {
+		if r.Method == http.MethodPost {
+			raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, mcpBodyLimit))
+			if err != nil {
+				http.Error(w, "MCP body exceeds limit or could not be read", http.StatusRequestEntityTooLarge)
+				return
+			}
+			// One message per request bounds work as well as bytes. Batches are
+			// deliberately unsupported; the SDK owns JSON-RPC dispatch.
+			trimmed := bytes.TrimSpace(raw)
+			if len(trimmed) == 0 || trimmed[0] != '{' || !json.Valid(raw) || !validJSONUnicode(raw) {
+				http.Error(w, "one valid UTF-8 JSON object required", http.StatusBadRequest)
+				return
+			}
+			r.Body = io.NopCloser(bytes.NewReader(raw))
+		}
+		s.mcp.ServeHTTP(w, r)
+		return
+	}
 	q := r.URL.Query()
 	var result any
-	var err error
+	var err, e error
 	switch r.URL.Path {
 	case "/readyz":
 		if r.Method != "GET" {
@@ -300,6 +397,8 @@ func (s *Server) fail(w http.ResponseWriter, err error) {
 	switch ae.Code {
 	case "auth":
 		status = 401
+	case "forbidden":
+		status = 403
 	case "not_found":
 		status = 404
 	case "conflict", "cursor_expired", "idempotency_conflict":

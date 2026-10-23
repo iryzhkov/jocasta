@@ -103,6 +103,12 @@ host actor; each value is a distinct random bearer token of at least 32 bytes.
 The server reloads credentials per request, so removing a host revokes access.
 The HTTP listener is for a restricted TLS ingress, not direct public exposure.
 
+An opt-in [HTTP MCP reader](docs/http-mcp.md) exposes get/list/search/history with
+per-request project grants and a resource-specific JWT audience. It is disabled
+by default. Disposable Authentik/Claude/Codex/T3 canaries passed the composed
+read-only path; the HTTP MCP guide records exact evidence and remaining
+qualification limits. Persistent activation is a separate deployment step.
+
 See [the operator guide](docs/operations.md), [API contract](docs/api.md), and
 [original design](docs/design-plan.md). The current 30-day archive policy and
 Docker deployment supersede the original plan's defaults. The design document records the original implementation contract.
