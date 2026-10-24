@@ -242,6 +242,11 @@ func (s *Server) searchView(ctx context.Context, a mcpPageArgs) (any, error) {
 		}
 		if at < 0 {
 			ex.Reason = "no_exact_literal_match"
+			if len(body) > 0 {
+				ex.Complete = false
+				ex.Truncated = true
+				ex.NextLines = fmt.Sprintf("1:%d", r.TotalLines)
+			}
 		} else {
 			// Start on the matching logical line, or the exact match when that line
 			// is too long. Never reconstruct offsets from case-folded Unicode.

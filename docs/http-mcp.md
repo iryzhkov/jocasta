@@ -163,6 +163,11 @@ of the two pinned verifiers; signature, issuer, audience, subject, time and
 grants are then verified. Unknown issuers cause no key fetch. JWT-selected key
 URLs are ignored. Verification failure never falls through to opaque tokens.
 
+Recognized JWT claim names are exact and case-sensitive in both issuer selection
+and verified decoding. Alternate-case aliases of registered, scope, authorized-party
+or Jocasta grant fields are refused, including when a canonical field is also
+present. Unrelated provider claims retain their ignored semantics.
+
 The operator issuer requires boolean `jocasta_operator:true`, no
 `jocasta_projects` field at all, and `azp` exactly equal to the configured
 client ID. Null/false/string operator claims, combined project/operator grants,
@@ -248,7 +253,10 @@ Placement uses the earliest exact case-sensitive whitespace-delimited query
 term in the body. Metadata-only or differently cased hits may have no exact
 literal match, reported as `reason:"no_exact_literal_match"`. A bounded
 excerpt begins on the matching line or at the match in a very long line.
-`truncated` means it does not contain the entire body. Results above the
+`truncated` means it does not contain the entire body. A no-match excerpt for a
+nonempty body is incomplete/truncated and points to pinned line reads starting
+at line 1. An empty body is complete even when there is no literal match.
+Results above the
 64-KiB total budget refuse with a smaller-limit/pinned-read recommendation;
 the adapter never drops results while advancing the original cursor.
 Every view and excerpt resolves ACLs before locator/content work, including
@@ -268,7 +276,9 @@ Backtick and tilde fences require at least three delimiters; a closing fence
 uses the same delimiter with at least the opening length and only trailing
 whitespace. Backtick info cannot contain backticks. An unclosed fence consumes
 the remainder. Four-space/tab indented code, quote-prefixed lines, list item
-lines and their indented continuations are excluded. A nonblank line at or
+lines and their indented continuations are excluded. Leading tabs advance to
+four-column stops when determining continuation indentation, without changing
+source byte offsets. A nonblank line at or
 before the list item's indentation ends that bounded list context. HTML heading
 rendering, nested container parsing and full CommonMark are outside this grammar.
 The locator refuses more than 10,000 headings rather than silently indexing a

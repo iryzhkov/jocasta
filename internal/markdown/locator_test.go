@@ -41,6 +41,26 @@ func TestLocatorExactRangesAndGrammar(t *testing.T) {
 		t.Fatal(h, e)
 	}
 }
+func TestLocatorTabbedListContinuation(t *testing.T) {
+	for _, body := range []string{
+		"- item\n\tcontinuation\n  # Nested\n# Real",
+		"- item\r\n\tcontinuation\r\n  # Nested\r\n# Real",
+		"  - item\n\tcontinuation\n   # Nested\n# Real",
+		"- item\n \tcontinuation\n  # Nested\n# Real",
+		"- item\n\tcontinuation\n  Nested\n  ===\n# Real",
+	} {
+		idx, err := Scan(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(idx.Headings) != 1 || idx.Headings[0].Text != "Real" || idx.Headings[0].Start != strings.Index(body, "# Real") {
+			t.Errorf("tabbed list leaked a heading: %q: %+v", body, idx.Headings)
+		}
+		if _, err = idx.Select(Selector{Heading: "Nested"}); err == nil {
+			t.Error("list continuation became selectable")
+		}
+	}
+}
 func TestLocatorFencesSetextAndBounds(t *testing.T) {
 	cases := []struct {
 		body  string

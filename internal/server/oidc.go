@@ -253,11 +253,29 @@ func NewOperatorOIDC(cfg OperatorOIDCConfig) (*OIDCVerifier, error) {
 	return v, nil
 }
 
+// Claim names are case-sensitive. Reject aliases of recognized claims before
+// encoding/json's case-insensitive struct matching can disagree with map
+// presence checks. Selection and verified claims use this same bounded grammar.
+func tokenClaimFields(raw []byte) (map[string]json.RawMessage, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return nil, err
+	}
+	for name := range fields {
+		for _, canonical := range []string{"iss", "sub", "aud", "exp", "nbf", "iat", "jti", "scope", "jocasta_projects", "jocasta_operator", "azp"} {
+			if name != canonical && strings.EqualFold(name, canonical) {
+				return nil, errors.New("noncanonical token claim name")
+			}
+		}
+	}
+	return fields, nil
+}
+
 // Preserve presence separately: projects:null is forbidden on the operator issuer.
 func (c *tokenClaims) UnmarshalJSON(raw []byte) error {
 	type plain tokenClaims
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &fields); err != nil {
+	fields, err := tokenClaimFields(raw)
+	if err != nil {
 		return err
 	}
 	if c.operatorClientID != "" {
@@ -305,16 +323,18 @@ func (s *Server) mcpVerifier(raw string) (*OIDCVerifier, error) {
 	if err != nil {
 		return nil, err
 	}
-	var c struct {
-		Issuer string `json:"iss"`
+	fields, err := tokenClaimFields(payload)
+	if err != nil {
+		return nil, err
 	}
-	if json.Unmarshal(payload, &c) != nil {
+	var issuer string
+	if json.Unmarshal(fields["iss"], &issuer) != nil {
 		return nil, errors.New("invalid issuer")
 	}
-	if s.cfg.OIDC != nil && c.Issuer == s.cfg.OIDC.cfg.Issuer {
+	if s.cfg.OIDC != nil && issuer == s.cfg.OIDC.cfg.Issuer {
 		return s.cfg.OIDC, nil
 	}
-	if s.cfg.OperatorOIDC != nil && c.Issuer == s.cfg.OperatorOIDC.cfg.Issuer {
+	if s.cfg.OperatorOIDC != nil && issuer == s.cfg.OperatorOIDC.cfg.Issuer {
 		return s.cfg.OperatorOIDC, nil
 	}
 	return nil, errors.New("unknown issuer")

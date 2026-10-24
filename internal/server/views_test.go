@@ -184,4 +184,44 @@ func TestViewBudgetsAndExactReferenceReceipts(t *testing.T) {
 		}
 	}
 }
+func TestSearchExcerptCompletenessWithoutLiteralMatch(t *testing.T) {
+	for _, tt := range []struct {
+		name, body, query string
+		complete          bool
+		next              string
+	}{
+		{"metadata-nonempty", "# Heading\r\nunrelated π\r\n", "A/exact-path", false, "1:2"},
+		{"metadata-empty", "", "A/exact-path", true, ""},
+		{"case-fold-only", "NEEDLE", "needle", false, "1:1"},
+		{"whole-body-literal", "needle", "needle", true, ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newMCPFixture(t)
+			created, err := f.store.Mutate(context.Background(), "local", "create", api.Mutation{Operation: "create", Path: "A/exact-path", Content: &tt.body})
+			if err != nil {
+				t.Fatal(err)
+			}
+			session := f.client(t, &mcpBearerTransport{token: f.token(t, "A")})
+			var page enrichedPage
+			result := mcpCall(t, session, "search", map[string]any{"q": tt.query, "include_excerpts": true}, &page)
+			if result.IsError || len(page.Excerpts) != 1 {
+				t.Fatalf("search result: %+v %+v", result, page)
+			}
+			ex := page.Excerpts[0]
+			if ex.ID != created.Document.ID || ex.Revision != 1 || ex.ContentHash != store.Hash(tt.body) || ex.TotalBytes != len(tt.body) {
+				t.Fatal("unpinned excerpt", ex)
+			}
+			if ex.Complete != tt.complete || ex.Truncated == tt.complete || ex.NextLines != tt.next {
+				t.Errorf("dishonest completeness: %+v", ex)
+			}
+			if tt.name != "whole-body-literal" {
+				if ex.Content != "" || ex.StartByte != 0 || ex.EndByte != 0 || ex.Reason != "no_exact_literal_match" {
+					t.Fatal(ex)
+				}
+			} else if ex.Content != tt.body || ex.StartByte != 0 || ex.EndByte != len(tt.body) || ex.Reason != "" {
+				t.Fatal(ex)
+			}
+		})
+	}
+}
 func intPtr(n int) *int { return &n }

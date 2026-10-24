@@ -149,6 +149,81 @@ func TestOperatorStrictClaimsIssuerSelectionAndRESTBoundary(t *testing.T) {
 		t.Fatal(w.Body.String())
 	}
 }
+func TestOIDCExactCanonicalClaimNames(t *testing.T) {
+	f, o := newOperatorFixture(t)
+	for _, write := range []bool{false, true} {
+		p, e := o.verifier.verifyAudience(context.Background(), signed(t, o.key, operatorClaims(f, o, write)), f.server.mcpResource)
+		if e != nil || p.canMutate() != write {
+			t.Fatalf("canonical operator write=%v: %v", write, e)
+		}
+	}
+	limited := f.oidc.claims("A")
+	limited["aud"] = f.server.mcpResource
+	p, e := f.oidc.verifier.verifyAudience(context.Background(), signed(t, f.oidc.key, limited), f.server.mcpResource)
+	if e != nil || p.canMutate() {
+		t.Fatalf("canonical limited: %v", e)
+	}
+	for _, mode := range []string{"operator", "limited"} {
+		t.Run(mode, func(t *testing.T) {
+			for _, field := range []string{"iss", "sub", "aud", "exp", "nbf", "iat", "jti", "scope", "azp", "jocasta_projects", "jocasta_operator"} {
+				t.Run(field, func(t *testing.T) {
+					c := operatorClaims(f, o, true)
+					fixture := o
+					if mode == "limited" {
+						c = f.oidc.claims("A")
+						c["aud"] = f.server.mcpResource
+						c["azp"] = "limited-client"
+						fixture = f.oidc
+					}
+					c["jti"] = "fixture-token"
+					// Both replacing the canonical name and adding a conflicting alias must
+					// refuse; unknown provider claims remain outside this bounded name list.
+					for _, replace := range []bool{true, false} {
+						copy := jwt.MapClaims{}
+						for k, v := range c {
+							copy[k] = v
+						}
+						value, ok := copy[field]
+						if !ok {
+							if field == "jocasta_projects" {
+								value = []string{"A"}
+							} else {
+								value = true
+							}
+						}
+						if replace {
+							delete(copy, field)
+						}
+						copy[strings.ToUpper(field)] = value
+						raw := signed(t, fixture.key, copy)
+						if _, err := fixture.verifier.verifyAudience(context.Background(), raw, f.server.mcpResource); err == nil {
+							t.Errorf("accepted %s alias, replace=%v", field, replace)
+						}
+						request := httptest.NewRequest("POST", "/mcp", nil)
+						request.Header.Set("Authorization", "Bearer "+raw)
+						if _, err := f.server.authenticate(request); err == nil {
+							t.Errorf("issuer selector accepted %s alias, replace=%v", field, replace)
+						}
+					}
+				})
+			}
+		})
+	}
+	// Explicitly cover null/empty alternate-case projects in operator mode.
+	for _, projects := range []any{nil, []string{}, []string{"A"}} {
+		c := operatorClaims(f, o, true)
+		c["JoCaStA_Projects"] = projects
+		if _, err := o.verifier.verifyAudience(context.Background(), signed(t, o.key, c), f.server.mcpResource); err == nil {
+			t.Errorf("accepted alternate-case combined projects: %v", projects)
+		}
+	}
+	// Provider-owned unrelated claims keep their existing ignored semantics.
+	c := operatorClaims(f, o, true)
+	c["provider_metadata"] = "ignored"
+	if _, err := o.verifier.verifyAudience(context.Background(), signed(t, o.key, c), f.server.mcpResource); err != nil {
+		t.Fatal("unrelated claim changed", err)
+	}
+}
 func TestOperatorConfigPins(t *testing.T) {
 	for _, c := range []OperatorOIDCConfig{
 		{}, {Issuer: "https://issuer", ClientID: "client"}, {Issuer: "https://issuer", JWKSURL: "https://issuer/jwks"},

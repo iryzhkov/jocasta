@@ -50,14 +50,23 @@ func Scan(body string) (Index, error) {
 		}
 		text := strings.TrimSuffix(strings.TrimSuffix(body[pos:next], "\n"), "\r")
 		idx.TotalLines = line
-		indent := 0
-		for indent < len(text) && text[indent] == ' ' {
-			indent++
+		// Tabs advance to the next four-column stop. Keep byte offsets
+		// separate so tab-indented list continuations do not end the list.
+		indent, prefix := 0, 0
+		for prefix < len(text) {
+			if text[prefix] == ' ' {
+				indent++
+			} else if text[prefix] == '\t' {
+				indent += 4 - indent%4
+			} else {
+				break
+			}
+			prefix++
 		}
-		top := indent <= 3 && (indent == len(text) || text[indent] != '\t')
+		top := indent <= 3
 		t := ""
 		if top {
-			t = text[indent:]
+			t = text[prefix:]
 		}
 		if fence == 0 {
 			if listIndent >= 0 {
