@@ -23,6 +23,7 @@ import (
 type OIDCConfig struct{ Issuer, Audience, JWKSURL string }
 type OIDCVerifier struct {
 	cfg                OIDCConfig
+	operatorClientID   string
 	client             *http.Client
 	now                func() time.Time
 	mu                 sync.Mutex
@@ -51,8 +52,12 @@ func NewOIDC(cfg OIDCConfig) (*OIDCVerifier, error) {
 
 type tokenClaims struct {
 	jwt.RegisteredClaims
-	Scope    string   `json:"scope"`
-	Projects []string `json:"jocasta_projects"`
+	Scope            string          `json:"scope"`
+	Projects         []string        `json:"jocasta_projects"`
+	Operator         json.RawMessage `json:"jocasta_operator"`
+	AZP              string          `json:"azp"`
+	projectsPresent  bool
+	operatorClientID string
 	// Only MCP defers read-scope refusal until after signature validation, so
 	// the transport can distinguish insufficient_scope (403) from bad JWTs.
 	allowMissingRead bool
@@ -64,14 +69,26 @@ func (c *tokenClaims) Validate() error {
 		(c.NotBefore != nil && !c.NotBefore.Before(c.ExpiresAt.Time)) || len(c.Scope) > 2048 {
 		return errors.New("invalid token bounds")
 	}
-	hasRead := false
+	hasRead, hasWrite := false, false
 	for _, scope := range strings.Fields(c.Scope) {
+		if scope == "jocasta.write" {
+			hasWrite = true
+		}
 		if scope == "jocasta.read" {
 			hasRead = true
 		}
 	}
-	if !hasRead && !c.allowMissingRead {
+	if (!hasRead && !c.allowMissingRead) || (hasWrite && !hasRead) {
 		return errors.New("missing read scope")
+	}
+	if c.operatorClientID != "" {
+		if string(c.Operator) != "true" || c.projectsPresent || c.AZP != c.operatorClientID {
+			return errors.New("invalid operator grants")
+		}
+		return nil
+	}
+	if c.Operator != nil || hasWrite {
+		return errors.New("operator grant on limited issuer")
 	}
 	_, err := store.WithReadAccess(context.Background(), "validate", c.Projects)
 	return err
@@ -96,12 +113,15 @@ func (v *OIDCVerifier) verifyToken(ctx context.Context, raw, audience string, al
 	if len(raw) > 8192 {
 		return p, errors.New("token exceeds limit")
 	}
-	c := &tokenClaims{allowMissingRead: allowMissingRead}
+	c := &tokenClaims{allowMissingRead: allowMissingRead, operatorClientID: v.operatorClientID}
 	token, err := jwt.ParseWithClaims(raw, c, func(t *jwt.Token) (any, error) {
 		// Refuse unusable claims before network work. The library validates the
 		// signed registered claims after verifying RS256.
 		if c.Issuer != v.cfg.Issuer || c.Validate() != nil {
 			return nil, errors.New("invalid claims")
+		}
+		if v.operatorClientID != "" && len(c.Audience) != 1 {
+			return nil, errors.New("operator requires one resource audience")
 		}
 		matched := false
 		for _, a := range c.Audience {
@@ -215,4 +235,87 @@ func parseJWKS(raw []byte) (map[string]*rsa.PublicKey, error) {
 		return nil, bad
 	}
 	return keys, nil
+}
+
+// OperatorOIDCConfig is an explicit second trust pin, usable only at /mcp.
+// Audience is supplied by EnableMCP, never by an arbitrary operator setting.
+type OperatorOIDCConfig struct{ Issuer, JWKSURL, ClientID string }
+
+func NewOperatorOIDC(cfg OperatorOIDCConfig) (*OIDCVerifier, error) {
+	if cfg.ClientID == "" || len(cfg.ClientID) > 256 || strings.TrimSpace(cfg.ClientID) != cfg.ClientID {
+		return nil, errors.New("operator client ID required and bounded")
+	}
+	v, err := NewOIDC(OIDCConfig{Issuer: cfg.Issuer, JWKSURL: cfg.JWKSURL, Audience: "mcp-only"})
+	if err != nil {
+		return nil, err
+	}
+	v.operatorClientID = cfg.ClientID
+	return v, nil
+}
+
+// Preserve presence separately: projects:null is forbidden on the operator issuer.
+func (c *tokenClaims) UnmarshalJSON(raw []byte) error {
+	type plain tokenClaims
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return err
+	}
+	if c.operatorClientID != "" {
+		if scope, present := fields["scope"]; present && (len(scope) == 0 || scope[0] != '"') {
+			return errors.New("operator scope must be a string")
+		}
+	}
+	p := plain(*c)
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return err
+	}
+	*c = tokenClaims(p)
+	_, c.projectsPresent = fields["jocasta_projects"]
+	return nil
+}
+func (p principal) accessContext(ctx context.Context) (context.Context, error) {
+	if p.claims == nil {
+		return nil, errors.New("verified grants required")
+	}
+	if p.claims.operatorClientID != "" {
+		return store.WithOperatorAccess(ctx, p.actor, p.canMutate())
+	}
+	return store.WithReadAccess(ctx, p.actor, p.claims.Projects)
+}
+func (p principal) canMutate() bool {
+	return p.claims != nil && p.claims.operatorClientID != "" && hasScope(p.claims.Scope, "jocasta.read") && hasScope(p.claims.Scope, "jocasta.write")
+}
+func hasScope(scope, want string) bool {
+	for _, s := range strings.Fields(scope) {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
+// Decode only a bounded issuer to select a configured verifier. No token URL
+// can initiate discovery, and selection confers no authority before verification.
+func (s *Server) mcpVerifier(raw string) (*OIDCVerifier, error) {
+	parts := strings.Split(raw, ".")
+	if len(parts) != 3 || len(raw) > 8192 {
+		return nil, errors.New("invalid JWT")
+	}
+	payload, err := base64.RawURLEncoding.Strict().DecodeString(parts[1])
+	if err != nil {
+		return nil, err
+	}
+	var c struct {
+		Issuer string `json:"iss"`
+	}
+	if json.Unmarshal(payload, &c) != nil {
+		return nil, errors.New("invalid issuer")
+	}
+	if s.cfg.OIDC != nil && c.Issuer == s.cfg.OIDC.cfg.Issuer {
+		return s.cfg.OIDC, nil
+	}
+	if s.cfg.OperatorOIDC != nil && c.Issuer == s.cfg.OperatorOIDC.cfg.Issuer {
+		return s.cfg.OperatorOIDC, nil
+	}
+	return nil, errors.New("unknown issuer")
 }

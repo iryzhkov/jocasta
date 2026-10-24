@@ -59,3 +59,10 @@ Transport failures are distinct from revision conflicts; the CLI never overwrite
 newer content to make a retry succeed. `jocasta diff` compares two revisions in
 the client and emits a unified diff whose size follows the change rather than the
 document.
+
+
+HTTP MCP is an additive adapter at `/mcp`; see [its contract](http-mcp.md).
+Optional operator trust enables `mutate` and transactional exact `edit`;
+optional read arguments add outline/section views and pinned search excerpts.
+The REST v1 mutation wire types, receipt schema and legacy digests are unchanged.
+Operator OAuth tokens are MCP-only, and no JWT authorizes REST mutation.

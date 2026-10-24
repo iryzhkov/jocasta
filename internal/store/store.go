@@ -18,6 +18,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/iryzhkov/jocasta/internal/markdown"
 	"github.com/iryzhkov/jocasta/pkg/api"
 	"golang.org/x/text/unicode/norm"
 	_ "modernc.org/sqlite"
@@ -269,9 +270,12 @@ func (s *Store) checkBudget(extra int64) error {
 	return nil
 }
 func (s *Store) Mutate(ctx context.Context, actor, key string, m api.Mutation) (api.Receipt, error) {
+	return s.mutate(ctx, actor, key, m, nil)
+}
+func (s *Store) mutate(ctx context.Context, actor, key string, m api.Mutation, edit *EditRequest) (api.Receipt, error) {
 	var empty api.Receipt
-	if access(ctx) != nil {
-		return empty, &api.Error{Code: "forbidden", Message: "read-only credential"}
+	if err := requireDocumentWrite(ctx, actor); err != nil {
+		return empty, err
 	}
 	if actor == "" || key == "" || len(key) > 256 {
 		return empty, Invalid("idempotency key is required and must be at most 256 bytes")
@@ -289,6 +293,10 @@ func (s *Store) Mutate(ctx context.Context, actor, key string, m api.Mutation) (
 	}
 	raw, _ := json.Marshal(m)
 	digest := Hash(string(raw))
+	if edit != nil {
+		raw, _ = json.Marshal(edit)
+		digest = Hash("jocasta.edit/v1\x00" + string(raw))
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -353,6 +361,31 @@ func (s *Store) Mutate(ctx context.Context, actor, key string, m api.Mutation) (
 			return empty, &api.Error{Code: "conflict", Message: "document changed; reread and reconcile", ExpectedRevision: m.IfRevision, CurrentRevision: d.Revision, ID: d.ID, Actor: d.Actor}
 		}
 		old := d
+		if edit != nil {
+			start, end := 0, len(d.Content)
+			if edit.Section != nil {
+				idx, e := markdown.Scan(d.Content)
+				if e != nil {
+					return empty, Invalid(e.Error())
+				}
+				h, e := idx.Select(*edit.Section)
+				if e != nil {
+					return empty, sectionError(e)
+				}
+				start, end = h.Start, h.End
+			}
+			text := d.Content[start:end]
+			first := strings.Index(text, edit.Old)
+			if first < 0 || strings.Contains(text[first+1:], edit.Old) {
+				return empty, &api.Error{Code: "edit_match", Message: "old must match exactly once in selected range"}
+			}
+			at := start + strings.Index(text, edit.Old)
+			content := d.Content[:at] + edit.New + d.Content[at+len(edit.Old):]
+			if int64(len(content)) > s.cfg.MaxDocumentBytes {
+				return empty, Invalid("edited content exceeds document byte limit")
+			}
+			m.Content = &content
+		}
 		switch m.Operation {
 		case "put":
 			if m.Content != nil {
@@ -535,4 +568,43 @@ func (s *Store) Health(ctx context.Context) error {
 		return err
 	}
 	return s.checkBudget(0)
+}
+
+// EditRequest is MCP-only. The original request, including exact selector and
+// CAS, is domain-separated from legacy Mutation digests in the same receipt table.
+type EditRequest struct {
+	Path       string             `json:"path,omitempty"`
+	ID         string             `json:"id,omitempty"`
+	IfRevision int64              `json:"if_revision"`
+	Old        string             `json:"old"`
+	New        string             `json:"new"`
+	Section    *markdown.Selector `json:"section,omitempty"`
+	Message    string             `json:"message,omitempty"`
+}
+
+func (s *Store) Edit(ctx context.Context, actor, key string, e EditRequest) (api.Receipt, error) {
+	if err := requireDocumentWrite(ctx, actor); err != nil {
+		return api.Receipt{}, err
+	}
+	if (e.Path == "") == (e.ID == "") || e.IfRevision <= 0 || e.Old == "" {
+		return api.Receipt{}, Invalid("edit requires exactly one path or id, positive if_revision and nonempty old")
+	}
+	for _, text := range []string{e.Old, e.New} {
+		if !utf8.ValidString(text) || strings.ContainsRune(text, 0) || int64(len(text)) > s.cfg.MaxDocumentBytes {
+			return api.Receipt{}, Invalid("edit text exceeds document bounds")
+		}
+	}
+	return s.mutate(ctx, actor, key, api.Mutation{Operation: "put", Path: e.Path, ID: e.ID, IfRevision: e.IfRevision, Message: e.Message}, &e)
+}
+func sectionError(err error) error {
+	var se *markdown.SelectionError
+	if errors.As(err, &se) {
+		lines := []int{}
+		for _, h := range se.Candidates {
+			lines = append(lines, h.Line)
+		}
+		b, _ := json.Marshal(lines)
+		return &api.Error{Code: se.Code, Message: se.Error() + "; candidate heading_line values: " + string(b)}
+	}
+	return Invalid(err.Error())
 }

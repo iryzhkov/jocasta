@@ -44,8 +44,8 @@ Configuration: `JOCASTA_DB`, `JOCASTA_LISTEN`, `JOCASTA_TOKENS_FILE`,
 `JOCASTA_MAX_DOCUMENT_BYTES`, `JOCASTA_MAX_STORAGE_BYTES`,
 `JOCASTA_MIN_FREE_BYTES`, `JOCASTA_ARCHIVE_AFTER_DAYS`.
 Optional project-scoped JWT reads require all three of `JOCASTA_OIDC_ISSUER`,
-`JOCASTA_OIDC_AUDIENCE` and `JOCASTA_OIDC_JWKS_URL`. To enable the read-only
-HTTP MCP surface, also set `JOCASTA_MCP_RESOURCE_URL` to its exact canonical
+`JOCASTA_OIDC_AUDIENCE` and `JOCASTA_OIDC_JWKS_URL`. To enable the
+HTTP MCP adapter, also set `JOCASTA_MCP_RESOURCE_URL` to its exact canonical
 HTTPS `/mcp` URL. Keep the existing static token file for operator REST access;
 static tokens are not accepted by MCP. See [HTTP MCP](http-mcp.md) for trust,
 ingress and claim requirements. Both optional authentication paths are disabled
@@ -108,3 +108,29 @@ be frozen, stop before cutover.
 Before cutover rollback keeps the legacy folder authoritative. After new service
 writes begin, export/reconcile them before considering any rollback to legacy
 files. Never silently fall back to dual mutable stores.
+
+
+## Interactive MCP operator trust
+
+Optional `JOCASTA_OPERATOR_OIDC_ISSUER`, `JOCASTA_OPERATOR_OIDC_JWKS_URL`
+and `JOCASTA_OPERATOR_OIDC_CLIENT_ID` configure a separate pinned operator
+verifier. All default empty and must be supplied together with existing limited
+OIDC and the canonical MCP URL. Corresponding flags are
+`--operator-oidc-issuer`, `--operator-oidc-jwks-url`,
+`--operator-oidc-client-id`. No secret belongs in these settings.
+See [HTTP MCP](http-mcp.md) for claims, catalogs, bounds and native acceptance.
+
+Stage with operator trust off, enroll the dedicated public OAuth application
+through owning infrastructure, then enable only its exact issuer/JWKS/client ID.
+Use supported native OAuth login; do not copy static operator tokens or share
+limited-session helper credentials. Verify real claim behavior, read/write
+refusals, CAS/idempotency and automatic refresh separately for each pinned native
+client and official T3 composition. Keep named limited profiles limited.
+
+Rollback disables the new registration, revokes its refresh grants/application,
+then removes operator trust at the server and retires only owned issuer objects.
+Existing limited provider, REST tokens and documents remain. Removing issuer
+trust ends server acceptance; revoking issuance alone leaves already issued JWTs
+valid for up to expiry plus the existing 30-second leeway. No schema rollback is
+needed. Reverting code does not undo legitimate edits; any content restoration
+uses ordinary revisioned CAS operations.

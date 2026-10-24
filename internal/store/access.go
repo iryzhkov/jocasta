@@ -25,6 +25,8 @@ type accessKey struct{}
 type readAccess struct {
 	principal string
 	projects  []string
+	all       bool
+	canMutate bool
 }
 
 // WithReadAccess installs immutable, per-token read bounds. An absent context
@@ -54,7 +56,7 @@ func access(ctx context.Context) *readAccess {
 }
 func allowedPath(ctx context.Context, path string) bool {
 	a := access(ctx)
-	if a == nil {
+	if a == nil || a.all {
 		return true
 	}
 	project, _, ok := strings.Cut(path, "/")
@@ -70,7 +72,7 @@ func allowedPath(ctx context.Context, path string) bool {
 }
 func readFilter(ctx context.Context, where string, args []any, column string) (string, []any) {
 	a := access(ctx)
-	if a == nil {
+	if a == nil || a.all {
 		return where, args
 	}
 	marks := make([]string, len(a.projects))
@@ -88,8 +90,10 @@ func (s *Store) cursorSignature(ctx context.Context, value string) string {
 	b, _ := json.Marshal(struct {
 		Principal string
 		Projects  []string
+		All       bool
+		CanMutate bool
 		Value     string
-	}{a.principal, a.projects, value})
+	}{a.principal, a.projects, a.all, a.canMutate, value})
 	mac := hmac.New(sha256.New, s.cursorKey[:])
 	mac.Write(b)
 	return hex.EncodeToString(mac.Sum(nil))
@@ -113,4 +117,20 @@ func scopedState(ctx context.Context, tx *sql.Tx) (string, error) {
 		io.WriteString(h, id+":"+rev+";")
 	}
 	return hex.EncodeToString(h.Sum(nil)), rows.Err()
+}
+
+// WithOperatorAccess binds an authenticated all-project principal. It grants
+// document mutations only; requireWrite still refuses maintenance operations.
+func WithOperatorAccess(ctx context.Context, actor string, canMutate bool) (context.Context, error) {
+	if actor == "" {
+		return nil, Invalid("invalid operator actor")
+	}
+	return context.WithValue(ctx, accessKey{}, &readAccess{principal: actor, all: true, canMutate: canMutate}), nil
+}
+func limitedAccess(ctx context.Context) bool { a := access(ctx); return a != nil && !a.all }
+func requireDocumentWrite(ctx context.Context, actor string) error {
+	if a := access(ctx); a != nil && (a.principal != actor || !a.all || !a.canMutate) {
+		return &api.Error{Code: "forbidden", Message: "document mutation forbidden"}
+	}
+	return nil
 }

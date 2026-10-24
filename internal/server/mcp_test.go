@@ -92,13 +92,17 @@ func (f *mcpFixture) token(t *testing.T, projects ...string) string {
 	c["aud"] = f.server.mcpResource
 	return signed(t, f.oidc.key, c)
 }
-func (f *mcpFixture) client(t *testing.T, bearer *mcpBearerTransport) *mcp.ClientSession {
+func (f *mcpFixture) client(t *testing.T, bearer *mcpBearerTransport, timeouts ...time.Duration) *mcp.ClientSession {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	timeout := 10 * time.Second
+	if len(timeouts) > 0 {
+		timeout = timeouts[0]
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout+5*time.Second)
 	t.Cleanup(cancel)
 	client := mcp.NewClient(&mcp.Implementation{Name: "jocasta-fixture", Version: "1"}, nil)
 	session, err := client.Connect(ctx, &mcp.StreamableClientTransport{
-		Endpoint: f.http.URL + "/mcp", HTTPClient: &http.Client{Transport: bearer, Timeout: 10 * time.Second},
+		Endpoint: f.http.URL + "/mcp", HTTPClient: &http.Client{Transport: bearer, Timeout: timeout},
 		DisableStandaloneSSE: true, MaxRetries: -1,
 	}, nil)
 	if err != nil {
@@ -107,9 +111,13 @@ func (f *mcpFixture) client(t *testing.T, bearer *mcpBearerTransport) *mcp.Clien
 	t.Cleanup(func() { session.Close() })
 	return session
 }
-func mcpCall(t *testing.T, session *mcp.ClientSession, tool string, args any, out any) *mcp.CallToolResult {
+func mcpCall(t *testing.T, session *mcp.ClientSession, tool string, args any, out any, timeouts ...time.Duration) *mcp.CallToolResult {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	timeout := 10 * time.Second
+	if len(timeouts) > 0 {
+		timeout = timeouts[0]
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	r, err := session.CallTool(ctx, &mcp.CallToolParams{Name: tool, Arguments: args})
 	if err != nil {
@@ -126,9 +134,9 @@ func mcpCall(t *testing.T, session *mcp.ClientSession, tool string, args any, ou
 	}
 	return r
 }
-func mcpError(t *testing.T, session *mcp.ClientSession, tool string, args any, code string) {
+func mcpError(t *testing.T, session *mcp.ClientSession, tool string, args any, code string, timeouts ...time.Duration) {
 	t.Helper()
-	r := mcpCall(t, session, tool, args, nil)
+	r := mcpCall(t, session, tool, args, nil, timeouts...)
 	raw, _ := json.Marshal(r)
 	if !r.IsError || !strings.Contains(string(raw), code) || strings.Contains(string(raw), "DENIED") {
 		t.Fatalf("expected %s error: %s", code, raw)
