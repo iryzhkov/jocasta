@@ -23,6 +23,7 @@ import (
 type Config struct {
 	TokensFile       string
 	OIDC             *OIDCVerifier
+	OperatorOIDC     *OIDCVerifier
 	MaxDocumentBytes int64
 }
 type Server struct {
@@ -87,9 +88,16 @@ func (s *Server) authenticate(r *http.Request) (principal, error) {
 	// Enabling OIDC reserves dotted bearers for JWT validation; a failed
 	// verification never falls through to operator-token comparison.
 	// Legacy-only mode retains the existing opaque-token contract.
-	if s.cfg.OIDC != nil && strings.Contains(token, ".") {
+	if (s.cfg.OIDC != nil || s.cfg.OperatorOIDC != nil) && strings.Contains(token, ".") {
 		if r.URL.Path == "/mcp" {
-			return s.cfg.OIDC.verifyAudience(r.Context(), token, s.mcpResource)
+			v, err := s.mcpVerifier(token)
+			if err != nil {
+				return p, err
+			}
+			return v.verifyAudience(r.Context(), token, s.mcpResource)
+		}
+		if s.cfg.OIDC == nil {
+			return p, errors.New("limited issuer disabled")
 		}
 		return s.cfg.OIDC.verify(r.Context(), token)
 	}
@@ -155,7 +163,7 @@ func (s *Server) serveAuthenticated(w http.ResponseWriter, r *http.Request, p pr
 			s.fail(w, &api.Error{Code: "forbidden", Message: "read-only credential"})
 			return
 		}
-		ctx, err := store.WithReadAccess(r.Context(), actor, p.claims.Projects)
+		ctx, err := p.accessContext(r.Context())
 		if err != nil {
 			s.fail(w, &api.Error{Code: "auth", Message: "authentication failed"})
 			return
@@ -204,7 +212,17 @@ func (s *Server) serveAuthenticated(w http.ResponseWriter, r *http.Request, p pr
 	}
 	if r.URL.Path == "/mcp" {
 		if r.Method == http.MethodPost {
-			raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, mcpBodyLimit))
+			limit := int64(mcpBodyLimit)
+			if p.canMutate() {
+				release, err := s.acquireWrite(ctx)
+				if err != nil {
+					s.fail(w, err)
+					return
+				}
+				defer release()
+				limit = s.mcpWriteBodyLimit()
+			}
+			raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
 			if err != nil {
 				http.Error(w, "MCP body exceeds limit or could not be read", http.StatusRequestEntityTooLarge)
 				return
@@ -248,16 +266,12 @@ func (s *Server) serveAuthenticated(w http.ResponseWriter, r *http.Request, p pr
 			err = store.Invalid("POST required")
 			break
 		}
-		select {
-		case s.writes <- struct{}{}:
-			defer func() { <-s.writes }()
-		default:
-			err = &api.Error{Code: "unavailable", Message: "write capacity busy"}
+		release, writeErr := s.acquireWrite(ctx)
+		if writeErr != nil {
+			err = writeErr
 			break
 		}
-		if err != nil {
-			break
-		}
+		defer release()
 		r.Body = http.MaxBytesReader(w, r.Body, s.cfg.MaxDocumentBytes*6+65536)
 		raw, readErr := io.ReadAll(r.Body)
 		if readErr != nil || !validJSONUnicode(raw) {
@@ -413,3 +427,16 @@ func (s *Server) fail(w http.ResponseWriter, err error) {
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(api.ErrorEnvelope{Version: api.Version, Error: ae})
 }
+
+func (s *Server) acquireWrite(ctx context.Context) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	select {
+	case s.writes <- struct{}{}:
+		return func() { <-s.writes }, nil
+	default:
+		return nil, &api.Error{Code: "unavailable", Message: "write capacity busy"}
+	}
+}
+func (s *Server) mcpWriteBodyLimit() int64 { return s.cfg.MaxDocumentBytes*6 + 65536 }

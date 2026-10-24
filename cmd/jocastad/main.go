@@ -51,6 +51,9 @@ func main() {
 	oidcIssuer := fs.String("oidc-issuer", env("JOCASTA_OIDC_ISSUER", ""), "exact trusted HTTPS OIDC issuer")
 	oidcAudience := fs.String("oidc-audience", env("JOCASTA_OIDC_AUDIENCE", ""), "required JWT audience")
 	oidcJWKS := fs.String("oidc-jwks-url", env("JOCASTA_OIDC_JWKS_URL", ""), "pinned HTTPS JWKS URL; no discovery")
+	operatorIssuer := fs.String("operator-oidc-issuer", env("JOCASTA_OPERATOR_OIDC_ISSUER", ""), "optional pinned operator HTTPS issuer; MCP only")
+	operatorJWKS := fs.String("operator-oidc-jwks-url", env("JOCASTA_OPERATOR_OIDC_JWKS_URL", ""), "optional pinned operator HTTPS JWKS URL")
+	operatorClientID := fs.String("operator-oidc-client-id", env("JOCASTA_OPERATOR_OIDC_CLIENT_ID", ""), "optional fixed operator OAuth client ID")
 	mcpResource := fs.String("mcp-resource-url", env("JOCASTA_MCP_RESOURCE_URL", ""), "opt-in canonical HTTPS MCP resource URL ending in /mcp")
 	mcpLoopback := fs.Bool("mcp-allow-loopback-http", false, "allow loopback HTTP MCP resource for disposable fixtures")
 	output := fs.String("output", "", "new backup database path")
@@ -93,6 +96,16 @@ func main() {
 			log.Fatal(err)
 		}
 	}
+	var operatorOIDC *server.OIDCVerifier
+	if *operatorIssuer != "" || *operatorJWKS != "" || *operatorClientID != "" {
+		if *mcpResource == "" {
+			log.Fatal("operator OIDC requires MCP resource")
+		}
+		operatorOIDC, err = server.NewOperatorOIDC(server.OperatorOIDCConfig{Issuer: *operatorIssuer, JWKSURL: *operatorJWKS, ClientID: *operatorClientID})
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
 	if *tokens != "" {
 		if err = server.ValidateTokens(*tokens); err != nil {
 			log.Fatal(err)
@@ -100,7 +113,7 @@ func main() {
 	} else if oidc == nil {
 		log.Fatal("at least one authentication method is required")
 	}
-	handler := server.New(s, server.Config{TokensFile: *tokens, OIDC: oidc, MaxDocumentBytes: cfg.MaxDocumentBytes})
+	handler := server.New(s, server.Config{TokensFile: *tokens, OIDC: oidc, OperatorOIDC: operatorOIDC, MaxDocumentBytes: cfg.MaxDocumentBytes})
 	if *mcpResource != "" {
 		if err = handler.EnableMCP(*mcpResource, *mcpLoopback); err != nil {
 			log.Fatal(err)

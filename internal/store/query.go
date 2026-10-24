@@ -205,7 +205,7 @@ func (s *Store) Page(ctx context.Context, f api.Filter, search bool) (api.Page, 
 	if f.Mode != "" && f.Mode != "default" && f.Mode != "literal" {
 		return p, Invalid("search mode must be default or literal")
 	}
-	if access(ctx) != nil && search {
+	if limitedAccess(ctx) && search {
 		f.Mode = "literal"
 	}
 	rawCursor := f.Cursor
@@ -222,7 +222,7 @@ func (s *Store) Page(ctx context.Context, f api.Filter, search bool) (api.Page, 
 	defer tx.Rollback()
 	var generation int64
 	var state string
-	if access(ctx) != nil {
+	if limitedAccess(ctx) {
 		state, err = scopedState(ctx, tx)
 	} else {
 		err = tx.QueryRowContext(ctx, "SELECT generation FROM state").Scan(&generation)
@@ -304,7 +304,7 @@ func (s *Store) Page(ctx context.Context, f api.Filter, search bool) (api.Page, 
 			// A literal scan is not a ranking; it walks documents in ID order
 			// because that is the total order its cursor pages through.
 			p.Ranking = "literal"
-			if access(ctx) != nil {
+			if limitedAccess(ctx) {
 				p.RankingReason = "project_scope"
 			}
 		}
