@@ -114,11 +114,11 @@ func (s *Server) EnableMCP(resource string, allowLoopbackHTTP bool) error {
 				return s.s.History(ctx, a.Path, a.ID, limit, a.Cursor)
 			})
 	}
-	addJocastaWriteTool(fullSrv, "mutate", "Apply create, put, move, archive, unarchive or restore with CAS and idempotency.",
+	addJocastaWriteTool(fullSrv, s.acquireWrite, "mutate", "Apply create, put, move, archive, unarchive or restore with CAS and idempotency.",
 		func(ctx context.Context, actor string, a mcpMutationArgs) (any, error) {
 			return s.s.Mutate(ctx, actor, a.IdempotencyKey, a.Mutation)
 		})
-	addJocastaWriteTool(fullSrv, "edit", "Replace unique exact old bytes, optionally in an exact section; requires CAS and idempotency.",
+	addJocastaWriteTool(fullSrv, s.acquireWrite, "edit", "Replace unique exact old bytes, optionally in an exact section; requires CAS and idempotency.",
 		func(ctx context.Context, actor string, a mcpEditArgs) (any, error) {
 			return s.s.Edit(ctx, actor, a.IdempotencyKey, a.EditRequest)
 		})
@@ -243,7 +243,7 @@ type mcpEditArgs struct {
 	IdempotencyKey string `json:"idempotency_key"`
 }
 
-func addJocastaWriteTool[In any](srv *mcp.Server, name, description string, run func(context.Context, string, In) (any, error)) {
+func addJocastaWriteTool[In any](srv *mcp.Server, acquire func(context.Context) (func(), error), name, description string, run func(context.Context, string, In) (any, error)) {
 	mcp.AddTool(srv, &mcp.Tool{Name: name, Description: description},
 		func(ctx context.Context, req *mcp.CallToolRequest, args In) (*mcp.CallToolResult, any, error) {
 			if req.Extra == nil || req.Extra.TokenInfo == nil {
@@ -259,6 +259,13 @@ func addJocastaWriteTool[In any](srv *mcp.Server, name, description string, run 
 			}
 			ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 			defer cancel()
+			// Own mutation capacity only for the authenticated handler's store
+			// operation, never for initialization, reads or response delivery.
+			release, err := acquire(ctx)
+			if err != nil {
+				return nil, nil, err
+			}
+			defer release()
 			out, err := run(ctx, p.actor, args)
 			return nil, out, err
 		})

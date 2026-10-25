@@ -139,7 +139,7 @@ func TestMCPWriteHandlerGuardIndependentOfCatalog(t *testing.T) {
 	}
 	srv := mcp.NewServer(&mcp.Implementation{Name: "guard-fixture", Version: "1"}, nil)
 	called := false
-	addJocastaWriteTool(srv, "mutate", "guard fixture", func(ctx context.Context, actor string, args mcpMutationArgs) (any, error) {
+	addJocastaWriteTool(srv, f.server.acquireWrite, "mutate", "guard fixture", func(ctx context.Context, actor string, args mcpMutationArgs) (any, error) {
 		called = true
 		return nil, nil
 	})
@@ -166,12 +166,18 @@ func TestMCPWriteHandlerGuardIndependentOfCatalog(t *testing.T) {
 }
 
 type observedBody struct {
-	read bool
-	body io.Reader
+	read  bool
+	bytes int
+	body  io.Reader
 }
 
-func (b *observedBody) Read(p []byte) (int, error) { b.read = true; return b.body.Read(p) }
-func (b *observedBody) Close() error               { return nil }
+func (b *observedBody) Read(p []byte) (int, error) {
+	b.read = true
+	n, err := b.body.Read(p)
+	b.bytes += n
+	return n, err
+}
+func (b *observedBody) Close() error { return nil }
 
 type cancelBody struct {
 	ctx     context.Context
@@ -201,21 +207,26 @@ func TestMCPWriteBodyAdmissionCancellationAndBounds(t *testing.T) {
 		f.server.ServeHTTP(w, req)
 		return w.Code
 	}
-	// The same limiter protects REST and the large MCP pre-read allocation.
-	for i := 0; i < cap(f.server.writes); i++ {
-		f.server.writes <- struct{}{}
+	// Two large envelopes may remain live in the SDK. A rejected third
+	// reads only the bounded prefix, before any large allocation.
+	for i := 0; i < cap(f.server.writeBodies); i++ {
+		f.server.writeBodies <- struct{}{}
 	}
-	body := &observedBody{body: strings.NewReader(message)}
+	body := &observedBody{body: strings.NewReader(strings.Repeat(" ", mcpBodyLimit+1) + message)}
 	req := httptest.NewRequest("POST", "/mcp", nil)
 	req.Body = body
 	req.Header.Set("Authorization", "Bearer "+token)
 	w := httptest.NewRecorder()
 	f.server.ServeHTTP(w, req)
-	if w.Code != 503 || body.read {
-		t.Fatal("allocated before admission", w.Code, body.read)
+	if w.Code != 503 || body.bytes != mcpBodyLimit+1 {
+		t.Fatal("allocated beyond prefix before admission", w.Code, body.bytes)
 	}
-	for i := 0; i < cap(f.server.writes); i++ {
-		<-f.server.writes
+	// Small protocol messages still work when large-body capacity is full.
+	if status := post(message, false); status != 200 {
+		t.Fatal("small message used large-body capacity", status)
+	}
+	for i := 0; i < cap(f.server.writeBodies); i++ {
+		<-f.server.writeBodies
 	}
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -226,7 +237,7 @@ func TestMCPWriteBodyAdmissionCancellationAndBounds(t *testing.T) {
 	live, cancelRead := context.WithCancel(context.Background())
 	blocked := &cancelBody{ctx: live, started: make(chan struct{})}
 	req = httptest.NewRequest("POST", "/mcp", nil).WithContext(live)
-	req.Body = blocked
+	req.Body = io.NopCloser(io.MultiReader(strings.NewReader(strings.Repeat(" ", mcpBodyLimit+1)), blocked))
 	req.Header.Set("Authorization", "Bearer "+token)
 	done := make(chan struct{})
 	go func() { defer close(done); f.server.ServeHTTP(httptest.NewRecorder(), req) }()
@@ -235,8 +246,8 @@ func TestMCPWriteBodyAdmissionCancellationAndBounds(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("body read did not start")
 	}
-	if len(f.server.writes) != 1 {
-		t.Fatal("body not protected by write admission")
+	if len(f.server.writeBodies) != 1 || len(f.server.writes) != 0 {
+		t.Fatal("large body must reserve body capacity only")
 	}
 	cancelRead()
 	select {
@@ -244,8 +255,8 @@ func TestMCPWriteBodyAdmissionCancellationAndBounds(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("cancelled pre-read did not release")
 	}
-	if len(f.server.writes) != 0 {
-		t.Fatal("cancelled body leaked write slot")
+	if len(f.server.writeBodies) != 0 || len(f.server.writes) != 0 {
+		t.Fatal("cancelled body leaked capacity")
 	}
 	for _, invalid := range []string{"[]", "{}{}", `{"x":"\ud800"}`, string([]byte{'{', '"', 255, '"', '}'})} {
 		if status := post(invalid, false); status != 400 || len(f.server.writes) != 0 {
