@@ -31,6 +31,7 @@ type Server struct {
 	cfg                Config
 	slots              chan struct{}
 	writes             chan struct{}
+	writeBodies        chan struct{}
 	requests, failures atomic.Uint64
 	mu                 sync.Mutex
 	rates              map[string]rate
@@ -49,7 +50,7 @@ func New(s *store.Store, cfg Config) *Server {
 	if cfg.MaxDocumentBytes == 0 {
 		cfg.MaxDocumentBytes = 16 << 20
 	}
-	return &Server{s: s, cfg: cfg, slots: make(chan struct{}, 8), writes: make(chan struct{}, 2), rates: map[string]rate{}}
+	return &Server{s: s, cfg: cfg, slots: make(chan struct{}, 8), writes: make(chan struct{}, 2), writeBodies: make(chan struct{}, 2), rates: map[string]rate{}}
 }
 func readTokens(path string) (map[string]string, error) {
 	f, e := os.Open(path)
@@ -214,15 +215,22 @@ func (s *Server) serveAuthenticated(w http.ResponseWriter, r *http.Request, p pr
 		if r.Method == http.MethodPost {
 			limit := int64(mcpBodyLimit)
 			if p.canMutate() {
-				release, err := s.acquireWrite(ctx)
-				if err != nil {
-					s.fail(w, err)
+				limit = s.mcpWriteBodyLimit()
+			}
+			reader := http.MaxBytesReader(w, r.Body, limit)
+			// Small protocol/read requests use only bounded request admission.
+			// Reserve a separate large-body slot before allocating beyond 64 KiB,
+			// retaining it through SDK dispatch while the body may remain live.
+			raw, err := io.ReadAll(io.LimitReader(reader, mcpBodyLimit+1))
+			if err == nil && len(raw) > mcpBodyLimit {
+				release, bodyErr := acquireCapacity(ctx, s.writeBodies, "write body capacity busy")
+				if bodyErr != nil {
+					s.fail(w, bodyErr)
 					return
 				}
 				defer release()
-				limit = s.mcpWriteBodyLimit()
+				raw, err = io.ReadAll(io.MultiReader(bytes.NewReader(raw), reader))
 			}
-			raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
 			if err != nil {
 				http.Error(w, "MCP body exceeds limit or could not be read", http.StatusRequestEntityTooLarge)
 				return
@@ -272,6 +280,14 @@ func (s *Server) serveAuthenticated(w http.ResponseWriter, r *http.Request, p pr
 			break
 		}
 		defer release()
+		// Keep the large-envelope allocation budget shared with MCP. REST
+		// retains its original whole-request mutation admission.
+		releaseBody, bodyErr := acquireCapacity(ctx, s.writeBodies, "write body capacity busy")
+		if bodyErr != nil {
+			err = bodyErr
+			break
+		}
+		defer releaseBody()
 		r.Body = http.MaxBytesReader(w, r.Body, s.cfg.MaxDocumentBytes*6+65536)
 		raw, readErr := io.ReadAll(r.Body)
 		if readErr != nil || !validJSONUnicode(raw) {
@@ -429,14 +445,18 @@ func (s *Server) fail(w http.ResponseWriter, err error) {
 }
 
 func (s *Server) acquireWrite(ctx context.Context) (func(), error) {
+	return acquireCapacity(ctx, s.writes, "write capacity busy")
+}
+
+func acquireCapacity(ctx context.Context, slots chan struct{}, message string) (func(), error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	select {
-	case s.writes <- struct{}{}:
-		return func() { <-s.writes }, nil
+	case slots <- struct{}{}:
+		return func() { <-slots }, nil
 	default:
-		return nil, &api.Error{Code: "unavailable", Message: "write capacity busy"}
+		return nil, &api.Error{Code: "unavailable", Message: message}
 	}
 }
 func (s *Server) mcpWriteBodyLimit() int64 { return s.cfg.MaxDocumentBytes*6 + 65536 }
