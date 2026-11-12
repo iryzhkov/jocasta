@@ -84,6 +84,18 @@ func filterSQL(f api.Filter, search bool) (string, []any) {
 func searchSQL(ranking string, f api.Filter, where string, filterArgs []any, q string, fuzzy []string, limit, offset int) (string, []any) {
 	names := "(instr(lower(path),?)>0 OR instr(lower(title),?)>0 OR id IN (SELECT id FROM paths WHERE instr(lower(path),?)>0))"
 	nameArgs := []any{q, q, q}
+	// Match complete path words independently of the full-text projection.
+	// A spaced query is not a substring of a hyphenated filename, and the
+	// projection may be unavailable or exclude an archived content match.
+	pathWords := "' ' || replace(replace(replace(replace(lower(path), '/', ' '), '-', ' '), '_', ' '), '.', ' ') || ' '"
+	wordTerms := []string{}
+	for _, word := range strings.Fields(q) {
+		wordTerms = append(wordTerms, "instr("+pathWords+",?)>0")
+		nameArgs = append(nameArgs, " "+word+" ")
+	}
+	if len(wordTerms) > 0 {
+		names += " OR id IN (SELECT id FROM paths WHERE " + strings.Join(wordTerms, " AND ") + ")"
+	}
 	if len(fuzzy) > 0 {
 		placeholders := make([]string, len(fuzzy))
 		for i, id := range fuzzy {
@@ -134,8 +146,18 @@ func searchSQL(ranking string, f api.Filter, where string, filterArgs []any, q s
 	return statement, args
 }
 
-// searchTokens returns at most eight lowercased query words, which bounds the
-// per-token part of the score for a long query.
+// matchesPathWords mirrors indexed path boundaries inside the ACL-bound scan.
+func matchesPathWords(path, query string) bool {
+	words := " " + strings.NewReplacer("/", " ", "-", " ", "_", " ", ".", " ").Replace(strings.ToLower(path)) + " "
+	for _, word := range strings.Fields(query) {
+		if !strings.Contains(words, " "+word+" ") {
+			return false
+		}
+	}
+	return strings.TrimSpace(query) != ""
+}
+
+// searchTokens bounds the per-token ranking work for a long query.
 func searchTokens(q string) []string {
 	tokens := strings.Fields(q)
 	if len(tokens) > 8 {
@@ -364,6 +386,9 @@ func (s *Store) Page(ctx context.Context, f api.Filter, search bool) (api.Page, 
 			scannedBytes += len(doc.Content)
 			if !defaultSearch {
 				matched = strings.Contains(strings.ToLower(x.path), q) || strings.Contains(strings.ToLower(x.title), q)
+				if limitedAccess(ctx) {
+					matched = matched || matchesPathWords(x.path, q)
+				}
 				if !matched {
 					var count int
 					aliasWhere, aliasArgs := readFilter(ctx, "id=? AND instr(lower(path),?)>0", []any{x.id, q}, "path")
