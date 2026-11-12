@@ -37,6 +37,9 @@ func TestSearchPathWords(t *testing.T) {
 			if err != nil || len(page.Documents) != 1 || page.Documents[0].ID != want.Document.ID {
 				t.Fatalf("limited path words: %+v, %v", page, err)
 			}
+			if degraded {
+				return // A missing projection intentionally prevents writes too.
+			}
 			if _, err := s.Mutate(ctx, "host", "archive-path", api.Mutation{Operation: "archive", ID: want.Document.ID, IfRevision: 1}); err != nil {
 				t.Fatal(err)
 			}

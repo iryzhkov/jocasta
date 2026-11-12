@@ -146,8 +146,7 @@ func searchSQL(ranking string, f api.Filter, where string, filterArgs []any, q s
 	return statement, args
 }
 
-// searchTokens returns at most eight lowercased query words, which bounds the
-// per-token part of the score for a long query.
+// matchesPathWords mirrors indexed path boundaries inside the ACL-bound scan.
 func matchesPathWords(path, query string) bool {
 	words := " " + strings.NewReplacer("/", " ", "-", " ", "_", " ", ".", " ").Replace(strings.ToLower(path)) + " "
 	for _, word := range strings.Fields(query) {
@@ -158,6 +157,7 @@ func matchesPathWords(path, query string) bool {
 	return strings.TrimSpace(query) != ""
 }
 
+// searchTokens bounds the per-token ranking work for a long query.
 func searchTokens(q string) []string {
 	tokens := strings.Fields(q)
 	if len(tokens) > 8 {
