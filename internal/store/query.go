@@ -84,6 +84,18 @@ func filterSQL(f api.Filter, search bool) (string, []any) {
 func searchSQL(ranking string, f api.Filter, where string, filterArgs []any, q string, fuzzy []string, limit, offset int) (string, []any) {
 	names := "(instr(lower(path),?)>0 OR instr(lower(title),?)>0 OR id IN (SELECT id FROM paths WHERE instr(lower(path),?)>0))"
 	nameArgs := []any{q, q, q}
+	// Match complete path words independently of the full-text projection.
+	// A spaced query is not a substring of a hyphenated filename, and the
+	// projection may be unavailable or exclude an archived content match.
+	pathWords := "' ' || replace(replace(replace(replace(lower(path), '/', ' '), '-', ' '), '_', ' '), '.', ' ') || ' '"
+	wordTerms := []string{}
+	for _, word := range strings.Fields(q) {
+		wordTerms = append(wordTerms, "instr("+pathWords+",?)>0")
+		nameArgs = append(nameArgs, " "+word+" ")
+	}
+	if len(wordTerms) > 0 {
+		names += " OR id IN (SELECT id FROM paths WHERE " + strings.Join(wordTerms, " AND ") + ")"
+	}
 	if len(fuzzy) > 0 {
 		placeholders := make([]string, len(fuzzy))
 		for i, id := range fuzzy {
